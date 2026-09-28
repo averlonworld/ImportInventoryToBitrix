@@ -10,6 +10,7 @@ import ImportHistory from './pages/ImportHistory';
 import ImportDetails from './pages/ImportDetails';
 import BitrixSettings from './pages/BitrixSettings';
 import DebugConsole from './pages/DebugConsole';
+import ErrorHandling from './pages/ErrorHandling';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, loading } = useAuth();
@@ -36,6 +37,7 @@ export default function App() {
         <Route path="invoices/import" element={<InvoiceImport />} />
         <Route path="imports" element={<ImportHistory />} />
         <Route path="imports/:id" element={<ImportDetails />} />
+        <Route path="error-handling" element={<ErrorHandling />} />
         <Route path="settings/bitrix" element={<BitrixSettings />} />
         <Route path="debug" element={<DebugConsole />} />
       </Route>

@@ -4,6 +4,7 @@ import { env } from './config/env';
 import { connectDatabase, disconnectDatabase, prisma } from './config/database';
 import { connectRedis, disconnectRedis } from './config/redis';
 import { startImportWorker, stopImportWorker } from './services/import/import.worker';
+import { DailyImportScheduler } from './services/schedule/dailyImport.scheduler';
 import { ensureUploadDir } from './utils/file.utils';
 import { logger } from './utils/logger';
 
@@ -44,6 +45,9 @@ async function bootstrap(): Promise<void> {
     // Start the import worker for background processing
     startImportWorker();
 
+    // Start the automated daily import scheduler
+    DailyImportScheduler.startScheduler();
+
     // Start the server
     const server = app.listen(env.PORT, '0.0.0.0', () => {
       logger.info(`Server running on port ${env.PORT} in ${env.NODE_ENV} mode`);
@@ -53,6 +57,7 @@ async function bootstrap(): Promise<void> {
     const shutdown = async (signal: string) => {
       logger.info(`${signal} received, shutting down gracefully`);
 
+      DailyImportScheduler.stopScheduler();
       await stopImportWorker();
 
       await new Promise<void>((resolve) => {

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { getImport, getImportErrors, downloadErrorReport, retryFailed } from '../services/import.api';
 import type { ImportJob, ImportRecord } from '../types';
@@ -95,6 +95,15 @@ export default function ImportDetails() {
           <p className="text-sm text-gray-500">ID: <span className="font-mono">{importJob.id}</span></p>
         </div>
         <div className="flex gap-2">
+          <Link
+            to={`/error-handling?jobId=${importJob.id}`}
+            className="btn-secondary text-sm flex items-center gap-1.5 border-blue-200 text-blue-700 bg-blue-50/50 hover:bg-blue-100/60"
+          >
+            <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            Live Monitor & Error Handling
+          </Link>
           <button onClick={handleDownloadErrors} className="btn-secondary text-sm" disabled={errors.length === 0}>
             Download Error Report
           </button>
@@ -151,10 +160,18 @@ export default function ImportDetails() {
       {/* Statistics */}
       <div className="card">
         <h3 className="text-lg font-medium mb-4">Statistics</h3>
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-4">
           <div className="text-center">
             <div className="text-2xl font-bold">{importJob.totalRows}</div>
             <div className="text-xs text-gray-500">Total</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-bold text-blue-600">{importJob.createdProductsCount ?? 0}</div>
+            <div className="text-xs text-gray-500">New Created</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-bold text-indigo-600">{importJob.updatedProductsCount ?? 0}</div>
+            <div className="text-xs text-gray-500">Updated</div>
           </div>
           <div className="text-center">
             <div className="text-2xl font-bold text-green-600">{importJob.successfulRows}</div>
@@ -165,12 +182,12 @@ export default function ImportDetails() {
             <div className="text-xs text-gray-500">Failed</div>
           </div>
           <div className="text-center">
-            <div className="text-2xl font-bold text-gray-500">{importJob.skippedRows}</div>
-            <div className="text-xs text-gray-500">Skipped</div>
+            <div className="text-2xl font-bold text-amber-600">{importJob.duplicateRows ?? 0}</div>
+            <div className="text-xs text-gray-500">Duplicates</div>
           </div>
           <div className="text-center">
-            <div className="text-2xl font-bold">{importJob.processedRows}</div>
-            <div className="text-xs text-gray-500">Processed</div>
+            <div className="text-2xl font-bold text-gray-500">{importJob.skippedRows}</div>
+            <div className="text-xs text-gray-500">Skipped</div>
           </div>
           <div className="text-center">
             <div className="text-2xl font-bold">{duration !== null ? `${duration}s` : '-'}</div>

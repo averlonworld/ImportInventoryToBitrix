@@ -35,3 +35,25 @@ export async function getStockReceiptFields(): Promise<ApiResponse<{
   const res = await api.get('/bitrix/stock-receipt-fields');
   return res.data;
 }
+
+export async function getQuotationProducts(search?: string, limit?: number): Promise<ApiResponse<any[]>> {
+  const params: any = {};
+  if (search) params.search = search;
+  if (limit) params.limit = limit;
+  const res = await api.get('/bitrix/quote-pricing/products', { params });
+  return res.data;
+}
+
+export async function applyQuotationPricing(data: {
+  entityId: number | string;
+  entityType?: 'quote' | 'deal';
+  customerType?: 'DEALER' | 'END_USER';
+}): Promise<ApiResponse<any>> {
+  const res = await api.post('/bitrix/quote-pricing/apply', data);
+  return res.data;
+}
+
+export async function getQuotationConfig(): Promise<ApiResponse<any>> {
+  const res = await api.get('/bitrix/quote-pricing/config');
+  return res.data;
+}

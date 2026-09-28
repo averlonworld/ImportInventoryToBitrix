@@ -223,6 +223,8 @@ export class ExcelValidator {
 
       const name = mapping.nameField ? this.getFieldValue(row, mapping.nameField) : undefined;
       const sku = mapping.skuField ? this.getFieldValue(row, mapping.skuField) : undefined;
+      const code = mapping.codeField ? this.getFieldValue(row, mapping.codeField) : undefined;
+      const description = mapping.descriptionField ? this.getFieldValue(row, mapping.descriptionField) : undefined;
       const quantityArrived = mapping.quantityArrivedField ? this.getFieldValue(row, mapping.quantityArrivedField) : undefined;
       const purchasePrice = mapping.purchasePriceField ? this.getFieldValue(row, mapping.purchasePriceField) : undefined;
       const salesPrice = mapping.salesPriceField ? this.getFieldValue(row, mapping.salesPriceField) : undefined;
@@ -230,10 +232,14 @@ export class ExcelValidator {
       const quantityDestination = mapping.quantityDestinationField ? this.getFieldValue(row, mapping.quantityDestinationField) : undefined;
 
       const hasName = name && String(name).trim() !== '';
-      const hasSku = sku && String(sku).trim() !== '';
+      const hasSku = (sku && String(sku).trim() !== '') || (code && String(code).trim() !== '');
 
       if (!hasName && !hasSku) {
-        rowErrors.push('Either Product Name or SKU is required.');
+        rowErrors.push('Either Product Name / Part Number or CODE / SKU is required.');
+      }
+
+      if (mapping.descriptionField && (!description || String(description).trim() === '')) {
+        rowErrors.push(`${mapping.descriptionField} (Description) is mandatory.`);
       }
 
       if (quantityArrived === undefined || quantityArrived === '' || quantityArrived === null) {
@@ -281,18 +287,19 @@ export class ExcelValidator {
         }
       }
 
-      if (hasSku) {
-        const skuStr = String(sku).trim();
-        if (skuMap.has(skuStr)) {
-          skuMap.get(skuStr)!.push(rowNumber);
+      const identifier = code || sku;
+      if (identifier && String(identifier).trim() !== '') {
+        const idStr = String(identifier).trim();
+        if (skuMap.has(idStr)) {
+          skuMap.get(idStr)!.push(rowNumber);
         } else {
-          skuMap.set(skuStr, [rowNumber]);
+          skuMap.set(idStr, [rowNumber]);
         }
       }
 
       if (rowErrors.length > 0) {
         invalidRows.push({ ...row, _errors: rowErrors });
-        errors.push({ rowNumber, sku: sku ? String(sku) : undefined, errors: rowErrors });
+        errors.push({ rowNumber, sku: identifier ? String(identifier) : undefined, errors: rowErrors });
       } else {
         validRows.push(row);
       }
@@ -320,11 +327,13 @@ export class ExcelValidator {
 
 export interface StockReceiptMappingValidationFields {
   skuField?: string;
-  nameField: string;
+  codeField?: string;
+  nameField?: string;
+  descriptionField?: string;
   barcodeField?: string;
   purchasePriceField?: string;
   salesPriceField?: string;
-  quantityArrivedField: string;
+  quantityArrivedField?: string;
   warehouseField?: string;
   quantityDestinationField?: string;
   totalField?: string;

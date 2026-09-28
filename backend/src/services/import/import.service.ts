@@ -26,10 +26,11 @@ export class ImportService {
     mapping: { skuField: string; nameField: string; quantityField?: string; priceField?: string; barcodeField?: string; },
     importMode: string
   ): Promise<ImportResult> {
-    const sku = rowData.sku;
-    const name = rowData.name;
+    const sku = (rowData.sku || '').trim();
+    const name = (rowData.name || '').trim();
     const quantity = rowData.quantity;
     const price = rowData.price;
+    const barcode = rowData.barcode ? String(rowData.barcode).trim() : undefined;
 
     if (!sku) {
       return { status: 'SKIPPED', errorMessage: 'Missing SKU' };
@@ -44,8 +45,14 @@ export class ImportService {
       const context = await catalogService.getCatalogContext();
       const productService = new BitrixProductService(client, context);
 
-      // Check if product exists by SKU (product code)
-      const existingProduct = await productService.findProductBySku(sku);
+      // Check if product exists by SKU (product code) or Barcode
+      let existingProduct = await productService.findProductBySku(sku);
+      if (!existingProduct && barcode) {
+        existingProduct = await productService.findProductByBarcode(barcode);
+      }
+      if (!existingProduct && name) {
+        existingProduct = await productService.findProductByName(name);
+      }
 
       if (importMode === 'CREATE_ONLY' && existingProduct) {
         return { status: 'SKIPPED', errorMessage: 'Product already exists (Create Only mode)' };
@@ -61,16 +68,17 @@ export class ImportService {
       if (existingProduct) {
         const updateFields: any = {};
         if (existingProduct.name !== name) updateFields.name = name;
+        if (barcode && existingProduct.barcode !== barcode) updateFields.barcode = barcode;
 
         if (Object.keys(updateFields).length > 0) {
           const updated = await productService.updateProduct(existingProduct.id, updateFields);
           if (!updated) {
-            return { status: 'FAILED', errorMessage: 'Failed to update existing product' };
+            partialMessages.push('Product details could not be updated');
           }
         }
         productId = existingProduct.id;
       } else {
-        productId = await productService.createProduct(name, sku);
+        productId = await productService.createProduct(name, sku, barcode);
       }
 
       if (!productId) {

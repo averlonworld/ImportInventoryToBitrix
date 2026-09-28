@@ -32,25 +32,28 @@ model BitrixConfiguration {
 }
 
 model ImportJob {
-  id             String         @id @default(uuid()) @db.Uuid
-  fileName       String
-  filePath       String
-  importMode     String         @default("CREATE_UPDATE")
-  type           String         @default("PRODUCTS")
-  status         String         @default("PENDING")
-  totalRows      Int            @default(0)
-  processedRows  Int            @default(0)
-  successfulRows Int            @default(0)
-  failedRows     Int            @default(0)
-  skippedRows    Int            @default(0)
-  mappingJson      Json?
-  bitrixDocumentId String?
-  startedAt        DateTime?
-  completedAt      DateTime?
-  createdAt        DateTime       @default(now())
-  createdBy        User?          @relation(fields: [createdById], references: [id])
-  createdById      String?        @db.Uuid
-  records          ImportRecord[]
+  id                   String         @id @default(uuid()) @db.Uuid
+  fileName             String
+  filePath             String
+  importMode           String         @default("CREATE_UPDATE")
+  type                 String         @default("PRODUCTS")
+  status               String         @default("PENDING")
+  totalRows            Int            @default(0)
+  processedRows        Int            @default(0)
+  successfulRows       Int            @default(0)
+  failedRows           Int            @default(0)
+  skippedRows          Int            @default(0)
+  createdProductsCount Int            @default(0)
+  updatedProductsCount Int            @default(0)
+  duplicateRows        Int            @default(0)
+  mappingJson          Json?
+  bitrixDocumentId     String?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  createdAt            DateTime       @default(now())
+  createdBy            User?          @relation(fields: [createdById], references: [id])
+  createdById          String?        @db.Uuid
+  records              ImportRecord[]
 }
 
 model ImportRecord {
@@ -60,15 +63,25 @@ model ImportRecord {
   rowNumber        Int
   sku              String?
   productName      String?
+  partNumber       String?
+  description      String?
   status           String    @default("PENDING")
+  actionTaken      String?
   bitrixProductId  String?
   bitrixDocumentId String?
   warehouseId      Int?
   quantityArrived  Float?
   purchasePrice    Float?
   salesPrice       Float?
+  cost             Float?
+  dealerPrice      Float?
+  endUserPrice     Float?
+  qtyOnOrder       Float?
+  qtyInStock       Float?
   errorMessage     String?
   bitrixError      String?
+  errorType        String?
+  retryCount       Int       @default(0)
   rawData          Json?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
@@ -76,6 +89,7 @@ model ImportRecord {
   @@index([importJobId])
   @@index([status])
   @@index([sku])
+  @@index([partNumber])
 }
 
 model ColumnMapping {

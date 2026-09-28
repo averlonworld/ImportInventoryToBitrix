@@ -60,8 +60,10 @@ export class ExcelService {
 
         headers.forEach((header, idx) => {
           const cell = row.getCell(idx + 1);
-          excelRow[header] = cell.text ?? '';
-          if (cell.text) hasData = true;
+          const textVal = cell.text ? String(cell.text).trim() : '';
+          const rawVal = textVal || this.cellToString(cell.value).trim();
+          excelRow[header] = rawVal;
+          if (rawVal) hasData = true;
         });
 
         if (hasData) {
@@ -190,23 +192,25 @@ export class ExcelService {
   }
 
   async generateErrorReport(
-    records: Array<{ rowNumber: number; sku: string; productName: string; status: string; errorMessage: string }>
+    records: Array<{ rowNumber: number; sku: string; partNumber?: string; productName: string; status: string; errorMessage: string }>
   ): Promise<ExcelJS.Workbook> {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Error Report');
 
     sheet.columns = [
       { header: 'Row', key: 'row', width: 10 },
-      { header: 'SKU', key: 'sku', width: 20 },
-      { header: 'Product', key: 'product', width: 30 },
-      { header: 'Status', key: 'status', width: 20 },
-      { header: 'Error', key: 'error', width: 50 },
+      { header: 'CODE', key: 'code', width: 25 },
+      { header: 'Part Number', key: 'partNumber', width: 25 },
+      { header: 'Description / Product', key: 'product', width: 40 },
+      { header: 'Import Status', key: 'status', width: 20 },
+      { header: 'Error Reason', key: 'error', width: 50 },
     ];
 
     records.forEach(record => {
       sheet.addRow({
         row: record.rowNumber,
-        sku: record.sku,
+        code: record.sku,
+        partNumber: record.partNumber || record.productName,
         product: record.productName,
         status: record.status,
         error: record.errorMessage,

@@ -1,16 +1,24 @@
 import { BitrixClient } from '../bitrix/BitrixClient';
-import { BitrixCatalogService, BitrixProductService } from '../bitrix/BitrixCatalogService';
+import { BitrixCatalogService, BitrixProductService, InventoryProductInput } from '../bitrix/BitrixCatalogService';
 import { BitrixStockReceiptService, BitrixStore } from '../bitrix/BitrixStockReceiptService';
 import { logger } from '../../utils/logger';
 import { debugLog } from '../debug/debugLog.service';
 
 export interface StockReceiptRowData {
   sku?: string;
-  name: string;
+  code?: string;
+  partNumber?: string;
+  description?: string;
+  name?: string;
   barcode?: string;
   purchasePrice?: number;
+  cost?: number;
   salesPrice?: number;
-  quantityArrived: number;
+  dealerPrice?: number;
+  endUserPrice?: number;
+  quantityArrived?: number;
+  qtyInStock?: number;
+  qtyOnOrder?: number;
   warehouse?: string;
   quantityDestination?: number;
   total?: number;
@@ -19,12 +27,21 @@ export interface StockReceiptRowData {
 }
 
 export interface StockReceiptMapping {
+  codeField?: string;
   skuField?: string;
-  nameField: string;
+  partNumberField?: string;
+  descriptionField?: string;
+  nameField?: string;
   barcodeField?: string;
+  costField?: string;
   purchasePriceField?: string;
+  dealerPriceField?: string;
+  endUserPriceField?: string;
   salesPriceField?: string;
-  quantityArrivedField: string;
+  qtyInStockField?: string;
+  quantityArrivedField?: string;
+  quantityField?: string;
+  qtyOnOrderField?: string;
   warehouseField?: string;
   quantityDestinationField?: string;
   totalField?: string;
@@ -36,12 +53,17 @@ export type StockReceiptResultStatus = 'SUCCESS' | 'FAILED' | 'SKIPPED' | 'PARTI
 
 export interface StockReceiptResult {
   status: StockReceiptResultStatus;
+  actionTaken?: 'CREATED' | 'UPDATED';
   bitrixProductId?: string;
   bitrixDocumentId?: string;
   warehouseId?: number;
   quantityArrived?: number;
   purchasePrice?: number;
   salesPrice?: number;
+  cost?: number;
+  dealerPrice?: number;
+  endUserPrice?: number;
+  qtyOnOrder?: number;
   errorMessage?: string;
   bitrixError?: string;
 }
@@ -54,19 +76,25 @@ export class StockReceiptImportService {
     bitrixDocumentId?: number,
     storesList?: BitrixStore[]
   ): Promise<StockReceiptResult> {
-    const sku = (rowData.sku || '').trim();
-    const name = (rowData.name || '').trim();
+    const code = (rowData.code || rowData.sku || '').trim();
+    const partNumber = (rowData.partNumber || rowData.name || '').trim();
+    const description = (rowData.description || rowData.name || '').trim();
     const barcode = (rowData.barcode || '').trim();
-    const quantityArrived = rowData.quantityArrived;
-    const purchasePrice = rowData.purchasePrice;
-    const salesPrice = rowData.salesPrice;
 
-    if (!name && !sku) {
-      return { status: 'SKIPPED', errorMessage: 'Missing product name or SKU' };
+    const cost = rowData.cost ?? rowData.purchasePrice;
+    const dealerPrice = rowData.dealerPrice;
+    const endUserPrice = rowData.endUserPrice ?? rowData.salesPrice;
+    const qtyInStock = rowData.qtyInStock ?? rowData.quantityArrived;
+    const qtyOnOrder = rowData.qtyOnOrder;
+
+    // Requirement 2: CODE is mandatory product identifier
+    if (!code) {
+      return { status: 'FAILED', errorMessage: 'CODE field is mandatory' };
     }
 
-    if (quantityArrived === undefined || quantityArrived === null || isNaN(Number(quantityArrived)) || Number(quantityArrived) < 0) {
-      return { status: 'FAILED', errorMessage: 'Quantity Arrived is required and must be non-negative' };
+    // Requirement 3: The DESCRIPTION field is mandatory
+    if (!description) {
+      return { status: 'FAILED', errorMessage: 'DESCRIPTION field is mandatory' };
     }
 
     try {
@@ -77,7 +105,7 @@ export class StockReceiptImportService {
       const productService = new BitrixProductService(client, context);
 
       // Resolve destination warehouse
-      let resolvedStoreId = mapping.defaultStoreId || rowData.defaultStoreId;
+      let resolvedStoreId: number | undefined;
       if (rowData.warehouse && storesList && storesList.length > 0) {
         const whRaw = String(rowData.warehouse).trim().toLowerCase();
         const matched = storesList.find(s => 
@@ -90,17 +118,36 @@ export class StockReceiptImportService {
         }
       }
 
-      if (!resolvedStoreId && storesList && storesList.length > 0) {
-        resolvedStoreId = storesList[0].id;
+      if (!resolvedStoreId && (mapping.defaultStoreId || rowData.defaultStoreId)) {
+        const reqStoreId = Number(mapping.defaultStoreId || rowData.defaultStoreId);
+        if (storesList && storesList.some(s => s.id === reqStoreId)) {
+          resolvedStoreId = reqStoreId;
+        }
       }
 
-      // Step 1: Product Catalog Sync
-      let existingProduct: any = null;
-      if (sku) {
-        existingProduct = await productService.findProductBySku(sku);
+      if (!resolvedStoreId) {
+        if (!storesList || storesList.length === 0) {
+          try {
+            storesList = await stockReceiptService.getStores();
+          } catch {
+            storesList = [];
+          }
+        }
+        if (storesList && storesList.length > 0) {
+          const mainStore = storesList.find(s => s.title.toLowerCase().includes('main') || s.id === 62);
+          resolvedStoreId = mainStore ? mainStore.id : storesList[0].id;
+        }
       }
-      if (!existingProduct && name) {
-        existingProduct = await productService.findProductByName(name);
+      if (!resolvedStoreId || resolvedStoreId === 1) resolvedStoreId = 62;
+
+      // Step 1: Product Matching
+      // Requirement 2: Match by CODE
+      let existingProduct = await productService.findProductByCode(code);
+      if (!existingProduct && code !== rowData.sku && rowData.sku) {
+        existingProduct = await productService.findProductBySku(rowData.sku);
+      }
+      if (!existingProduct && barcode) {
+        existingProduct = await productService.findProductByBarcode(barcode);
       }
 
       if (importMode === 'UPDATE_ONLY' && !existingProduct) {
@@ -108,106 +155,102 @@ export class StockReceiptImportService {
       }
 
       let productId: number;
+      let actionTaken: 'CREATED' | 'UPDATED';
       let partialNotes: string[] = [];
+
+      const productPayload: InventoryProductInput = {
+        code,
+        partNumber: partNumber || code, // Requirement 12: PART NUMBER → Product Title
+        description,                   // Requirement 3 & 12: DESCRIPTION → Product Description
+        cost: cost !== undefined ? Number(cost) : undefined,
+        dealerPrice: dealerPrice !== undefined ? Number(dealerPrice) : undefined,
+        endUserPrice: endUserPrice !== undefined ? Number(endUserPrice) : undefined,
+        qtyOnOrder: qtyOnOrder !== undefined ? Number(qtyOnOrder) : undefined,
+        qtyInStock: qtyInStock !== undefined && qtyInStock !== null && !isNaN(Number(qtyInStock)) ? Number(qtyInStock) : undefined,
+        barcode: barcode || undefined,
+      };
 
       if (existingProduct) {
         productId = Number(existingProduct.id);
+        actionTaken = 'UPDATED';
 
         if (importMode !== 'CREATE_ONLY') {
-          const updateFields: any = {};
-          if (name && existingProduct.name !== name) updateFields.name = name;
-          if (barcode) updateFields.barcode = barcode;
-
-          if (Object.keys(updateFields).length > 0) {
-            const updated = await productService.updateProduct(productId, updateFields);
-            if (!updated) {
-              partialNotes.push('Failed to update product details');
-            }
-          }
+          await productService.updateInventoryProduct(productId, productPayload);
         }
       } else {
-        const productCode = sku || `SKU-${Date.now().toString(36).toUpperCase()}`;
-        const productName = name || `Product ${productCode}`;
-        productId = await productService.createProduct(productName, productCode, barcode || undefined);
+        actionTaken = 'CREATED';
+        productId = await productService.createInventoryProduct(productPayload);
       }
 
       if (!productId) {
         return { status: 'FAILED', errorMessage: 'Failed to obtain Bitrix product ID' };
       }
 
-      // Update Sales Price if mapped and positive
-      if (salesPrice !== undefined && salesPrice !== null && !isNaN(Number(salesPrice)) && Number(salesPrice) > 0) {
-        const priceOk = await productService.setPrice(productId, Number(salesPrice));
-        if (!priceOk) {
-          partialNotes.push('Base sales price could not be saved');
-        }
-      }
+      // Step 2: Bitrix Inventory Stock Receipt Document Sync (QTY IN STOCK)
+      const finalStoreId = Number(resolvedStoreId);
+      const qtyNum = qtyInStock !== undefined && qtyInStock !== null && !isNaN(Number(qtyInStock)) ? Number(qtyInStock) : 0;
 
-      // Update Purchasing Price (Cost) on product if mapped and positive
-      if (purchasePrice !== undefined && purchasePrice !== null && !isNaN(Number(purchasePrice)) && Number(purchasePrice) > 0) {
-        try {
-          await productService.updateProduct(productId, {
-            purchasingPrice: Number(purchasePrice),
-            purchasingCurrency: context.currency || 'AED',
-          });
-        } catch {
-          // non-blocking
-        }
-      }
-
-      const finalStoreId = resolvedStoreId && Number(resolvedStoreId) > 0 ? Number(resolvedStoreId) : 1;
-
-      // Step 2: Bitrix Inventory Stock Receipt Document Sync
-      let docElementAdded = false;
-      const qtyToReceive = Number(quantityArrived);
-      if (bitrixDocumentId && !isNaN(qtyToReceive) && qtyToReceive > 0) {
+      if (bitrixDocumentId && qtyNum > 0) {
         try {
           await stockReceiptService.addDocumentElement(
             bitrixDocumentId,
             productId,
-            qtyToReceive,
-            purchasePrice !== undefined ? Number(purchasePrice) : undefined,
+            qtyNum,
+            cost !== undefined ? Number(cost) : undefined,
             finalStoreId
           );
-          docElementAdded = true;
-          debugLog.debug('IMPORT', `Added product ${productId} to stock receipt doc ${bitrixDocumentId}`);
+          debugLog.debug('IMPORT', `Added product ${productId} to stock receipt doc ${bitrixDocumentId} with amount ${qtyNum}`);
         } catch (docErr: any) {
-          partialNotes.push(`Stock receipt line item error: ${docErr.message}`);
+          partialNotes.push(`Stock receipt doc line item warning: ${docErr.message}`);
         }
       }
 
-      // Fallback/Direct Store Stock Sync to ensure warehouse records reflect the arrival
+      // Sync direct store stock
       try {
-        await stockReceiptService.syncDirectStoreStock(productId, finalStoreId, Number(quantityArrived));
+        await stockReceiptService.syncDirectStoreStock(productId, finalStoreId, qtyNum);
       } catch {
         // Non-blocking
       }
 
-      // Legacy product quantity update probe
+      // Also set product quantity field if supported
       try {
-        await productService.setQuantity(productId, Number(quantityArrived));
+        await productService.setQuantity(productId, qtyNum);
       } catch {
         // Non-blocking
+      }
+
+      // Also set product reserved quantity (QTY ON ORDER) if provided
+      if (qtyOnOrder !== undefined && qtyOnOrder !== null && !isNaN(Number(qtyOnOrder))) {
+        try {
+          await productService.setReservedQuantity(productId, Number(qtyOnOrder));
+        } catch {
+          // Non-blocking
+        }
       }
 
       const status: StockReceiptResultStatus = partialNotes.length > 0 ? 'PARTIAL_FAILURE' : 'SUCCESS';
 
       return {
         status,
+        actionTaken,
         bitrixProductId: String(productId),
         bitrixDocumentId: bitrixDocumentId ? String(bitrixDocumentId) : undefined,
-        warehouseId: resolvedStoreId ? Number(resolvedStoreId) : undefined,
-        quantityArrived: Number(quantityArrived),
-        purchasePrice: purchasePrice !== undefined ? Number(purchasePrice) : undefined,
-        salesPrice: salesPrice !== undefined ? Number(salesPrice) : undefined,
+        warehouseId: finalStoreId,
+        quantityArrived: qtyNum,
+        purchasePrice: cost !== undefined ? Number(cost) : undefined,
+        salesPrice: endUserPrice !== undefined ? Number(endUserPrice) : undefined,
+        cost: cost !== undefined ? Number(cost) : undefined,
+        dealerPrice: dealerPrice !== undefined ? Number(dealerPrice) : undefined,
+        endUserPrice: endUserPrice !== undefined ? Number(endUserPrice) : undefined,
+        qtyOnOrder: qtyOnOrder !== undefined ? Number(qtyOnOrder) : undefined,
         errorMessage: partialNotes.length > 0 ? partialNotes.join('; ') : undefined,
       };
     } catch (error: any) {
-      logger.error({ err: error, sku, name }, 'Stock receipt record processing failed');
+      logger.error({ err: error, code, partNumber }, 'Stock receipt record processing failed');
       return {
         status: 'FAILED',
-        errorMessage: error.message || 'Unknown error while processing stock receipt',
-        bitrixError: 'Bitrix API error during stock receipt processing',
+        errorMessage: error.message || 'Unknown error while processing inventory record',
+        bitrixError: 'Bitrix API error during inventory sync',
       };
     }
   }

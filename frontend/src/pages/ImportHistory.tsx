@@ -78,36 +78,30 @@ export default function ImportHistory() {
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ID</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">File</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Mode</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date & Time</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">File Name</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Success</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Failed</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Skipped</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-blue-600 uppercase">New Created</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-indigo-600 uppercase">Updated</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-green-600 uppercase">Success</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-red-600 uppercase">Failed</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-amber-600 uppercase">Duplicates</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
                 {imports.map((imp) => (
                   <tr key={imp.id} onClick={() => navigate(`/imports/${imp.id}`)} className="hover:bg-gray-50 cursor-pointer">
-                    <td className="px-4 py-3 text-sm text-gray-500 font-mono">{imp.id.slice(0, 8)}</td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                        imp.type === 'INVOICES' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
-                      }`}>
-                        {imp.type === 'INVOICES' ? 'Invoices' : 'Products'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-sm font-medium">{imp.fileName}</td>
-                    <td className="px-4 py-3 text-sm text-gray-500">{new Date(imp.createdAt).toLocaleString()}</td>
-                    <td className="px-4 py-3 text-sm text-gray-600">{imp.importMode.replace(/_/g, ' ')}</td>
-                    <td className="px-4 py-3 text-sm text-right">{imp.totalRows}</td>
-                    <td className="px-4 py-3 text-sm text-right text-green-600">{imp.successfulRows}</td>
-                    <td className="px-4 py-3 text-sm text-right text-red-600">{imp.failedRows}</td>
-                    <td className="px-4 py-3 text-sm text-right text-gray-500">{imp.skippedRows}</td>
+                    <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">{new Date(imp.createdAt).toLocaleString()}</td>
+                    <td className="px-4 py-3 text-sm font-medium truncate max-w-xs">{imp.fileName}</td>
+                    <td className="px-4 py-3 text-sm text-right font-semibold">{imp.totalRows}</td>
+                    <td className="px-4 py-3 text-sm text-right text-blue-600 font-medium">{imp.createdProductsCount ?? 0}</td>
+                    <td className="px-4 py-3 text-sm text-right text-indigo-600 font-medium">{imp.updatedProductsCount ?? 0}</td>
+                    <td className="px-4 py-3 text-sm text-right text-green-600 font-semibold">{imp.successfulRows}</td>
+                    <td className="px-4 py-3 text-sm text-right text-red-600 font-semibold">{imp.failedRows}</td>
+                    <td className="px-4 py-3 text-sm text-right text-amber-600 font-medium">{imp.duplicateRows ?? 0}</td>
+                    <td className="px-4 py-3 text-sm text-gray-600 truncate max-w-[120px]">{imp.createdBy?.email || 'admin'}</td>
                     <td className="px-4 py-3"><StatusBadge status={imp.status} /></td>
                   </tr>
                 ))}

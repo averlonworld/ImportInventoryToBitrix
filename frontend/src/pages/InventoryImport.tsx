@@ -18,11 +18,20 @@ interface UploadedFile {
 }
 
 interface AutoMapping {
+  codeField?: string;           // Requirement 2 & 12: CODE (Unique product identifier)
+  partNumberField?: string;     // Requirement 12: PART NUMBER (Product Title / Name)
+  descriptionField?: string;    // Requirement 3 & 12: DESCRIPTION (Product Description - Mandatory)
+  qtyInStockField?: string;     // Requirement 4 & 6: QTY IN STOCK (Inventory Quantity)
+  qtyOnOrderField?: string;     // Requirement 4, 5 & 6: QTY ON ORDER (Quantity on order)
+  costField?: string;           // Requirement 4, 6 & 7: COST (Purchasing price)
+  dealerPriceField?: string;    // Requirement 4, 6, 7 & 11: DEALER PRICE (Dealer Price)
+  endUserPriceField?: string;   // Requirement 4, 6, 7 & 11: END USER PRICE (End User Price)
+  barcodeField?: string;
+  // Legacy / fallback aliases
   skuField?: string;
   nameField?: string;
   quantityField?: string;
   priceField?: string;
-  barcodeField?: string;
 }
 
 // Automatically matches Excel headers to Bitrix product catalog and inventory fields
@@ -30,102 +39,88 @@ function detectInventoryColumns(headers: string[]): AutoMapping {
   const result: AutoMapping = {};
   const clean = (s: string) => s.trim().toLowerCase();
 
-  // 1. SKU: CODE, SKU, PART NUMBER, PART NO, ITEM CODE, MODEL
+  // 1. CODE: CODE, ITEM CODE, PRODUCT CODE, SKU
   for (const h of headers) {
     const c = clean(h);
-    if (['sku', 'code', 'product_code', 'item_code', 'product sku', 'item code'].includes(c)) {
+    if (['code', 'item code', 'product code', 'item_code', 'sku'].includes(c)) {
+      result.codeField = h;
       result.skuField = h;
       break;
     }
   }
-  if (!result.skuField) {
-    for (const h of headers) {
-      const c = clean(h);
-      if (c.includes('sku') || c.includes('code') || c.includes('part number') || c.includes('part no') || c.includes('item no')) {
-        result.skuField = h;
-        break;
-      }
-    }
-  }
 
-  // 2. Product Name: DESCRIPTION, PRODUCT NAME, NAME, TITLE, ITEM NAME, PRODUCT
+  // 2. PART NUMBER: PART NUMBER, PART NO, PART_NO, PART_NUMBER, PARTNO, MODEL
   for (const h of headers) {
     const c = clean(h);
-    if (['description', 'product name', 'name', 'product_name', 'item name', 'item description', 'title', 'product'].includes(c)) {
+    if (['part number', 'part no', 'part_no', 'part_number', 'partno', 'part #', 'model', 'model no'].includes(c)) {
+      result.partNumberField = h;
       result.nameField = h;
       break;
     }
   }
-  if (!result.nameField) {
-    for (const h of headers) {
-      const c = clean(h);
-      if (c.includes('desc') || c.includes('name') || c.includes('title') || c.includes('item')) {
-        result.nameField = h;
-        break;
-      }
+
+  // 3. DESCRIPTION: DESCRIPTION, PRODUCT DESCRIPTION, ITEM DESCRIPTION, DESC
+  for (const h of headers) {
+    const c = clean(h);
+    if (['description', 'product description', 'item description', 'desc', 'product_description'].includes(c)) {
+      result.descriptionField = h;
+      break;
     }
   }
 
-  // 3. Quantity: QTY IN STOCK, QUANTITY, QTY, STOCK, STOCK_QUANTITY, AMOUNT, IN STOCK, AVAILABLE
+  // 4. QTY IN STOCK: QTY IN STOCK, QUANTITY IN STOCK, IN STOCK, QTY, QUANTITY, STOCK
   for (const h of headers) {
     const c = clean(h);
-    if (['qty in stock', 'quantity', 'qty', 'stock', 'stock_quantity', 'amount', 'in stock', 'available stock', 'stock qty'].includes(c)) {
+    if (['qty in stock', 'quantity in stock', 'in stock', 'qty', 'quantity', 'stock', 'available stock'].includes(c)) {
+      result.qtyInStockField = h;
       result.quantityField = h;
       break;
     }
   }
-  if (!result.quantityField) {
-    for (const h of headers) {
-      const c = clean(h);
-      if (c.includes('qty') || c.includes('quantity') || c.includes('stock')) {
-        result.quantityField = h;
-        break;
-      }
+
+  // 5. QTY ON ORDER: QTY ON ORDER, ON ORDER, ORDERED QTY, QTY_ON_ORDER
+  for (const h of headers) {
+    const c = clean(h);
+    if (['qty on order', 'quantity on order', 'on order', 'ordered qty', 'qty_on_order', 'order qty'].includes(c)) {
+      result.qtyOnOrderField = h;
+      break;
     }
   }
 
-  // 4. Price: END USER PRICE, DEALER PRICE, PRICE, BASE_PRICE, UNIT_PRICE, SELLING PRICE, MRP, COST
+  // 6. COST: COST, COST , PURCHASE PRICE, PURCHASING PRICE, BUY PRICE
   for (const h of headers) {
     const c = clean(h);
-    if (['end user price', 'dealer price', 'price', 'base_price', 'unit_price', 'selling price', 'mrp', 'cost', 'cost '].includes(c)) {
+    if (['cost', 'cost ', 'purchase price', 'purchasing price', 'cost price', 'buy price'].includes(c)) {
+      result.costField = h;
+      break;
+    }
+  }
+
+  // 7. DEALER PRICE: DEALER PRICE, DEALER_PRICE, DEALER, WHOLESALE PRICE
+  for (const h of headers) {
+    const c = clean(h);
+    if (['dealer price', 'dealer_price', 'dealer', 'wholesale price'].includes(c)) {
+      result.dealerPriceField = h;
+      break;
+    }
+  }
+
+  // 8. END USER PRICE: END USER PRICE, END_USER_PRICE, RETAIL PRICE, SELLING PRICE, PRICE, MRP
+  for (const h of headers) {
+    const c = clean(h);
+    if (['end user price', 'end_user_price', 'retail price', 'selling price', 'mrp', 'price'].includes(c)) {
+      result.endUserPriceField = h;
       result.priceField = h;
       break;
     }
   }
-  if (!result.priceField) {
-    for (const h of headers) {
-      const c = clean(h);
-      if (c.includes('price') || c.includes('cost') || c.includes('rate') || c.includes('mrp')) {
-        result.priceField = h;
-        break;
-      }
-    }
-  }
 
-  // 5. Barcode: BARCODE, BAR CODE, EAN, UPC, GTIN, CODE, PART NUMBER
+  // 9. BARCODE: BARCODE, BAR CODE, EAN, UPC, GTIN
   for (const h of headers) {
     const c = clean(h);
-    if (['barcode', 'bar code', 'ean', 'upc', 'gtin', 'item barcode', 'barcode no', 'barcode number'].includes(c)) {
+    if (['barcode', 'bar code', 'ean', 'upc', 'gtin', 'item barcode'].includes(c)) {
       result.barcodeField = h;
       break;
-    }
-  }
-  if (!result.barcodeField) {
-    for (const h of headers) {
-      const c = clean(h);
-      if (c.includes('barcode') || c.includes('bar code') || c.includes('ean') || c.includes('upc')) {
-        result.barcodeField = h;
-        break;
-      }
-    }
-  }
-  if (!result.barcodeField) {
-    for (const h of headers) {
-      const c = clean(h);
-      if ((c === 'code' || c === 'item code' || c === 'part number' || c === 'part no') && h !== result.skuField) {
-        result.barcodeField = h;
-        break;
-      }
     }
   }
 
@@ -146,10 +141,13 @@ export default function InventoryImport() {
   const [importJobId, setImportJobId] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [creatingImport, setCreatingImport] = useState(false);
+  const [documentTitle, setDocumentTitle] = useState('');
 
   // Step 0 -> Step 1: Upload and auto-preview
   const handleUploaded = useCallback(async (data: UploadedFile) => {
     setUploadedFile(data);
+    const cleanName = data.fileName.replace(/\.[^/.]+$/, '').trim();
+    setDocumentTitle(cleanName);
     setPreviewLoading(true);
     setCurrentStep(1); // Move to Preview
     try {
@@ -186,8 +184,13 @@ export default function InventoryImport() {
 
   // Step 1 -> Step 2: Validate auto-mapped required columns before Confirm
   const handleProceedToConfirm = () => {
-    if (!mapping.skuField && !mapping.nameField) {
-      toast.error('Could not auto-detect SKU or Product Name. Please select them below.');
+    if (!mapping.codeField && !mapping.skuField) {
+      toast.error('CODE column is required.');
+      setShowMappingAdjust(true);
+      return;
+    }
+    if (!mapping.descriptionField && !mapping.nameField) {
+      toast.error('DESCRIPTION column is mandatory (Requirement 3).');
       setShowMappingAdjust(true);
       return;
     }
@@ -202,21 +205,32 @@ export default function InventoryImport() {
     setCreatingImport(true);
 
     try {
+      const finalDocTitle = documentTitle.trim() || uploadedFile.fileName.replace(/\.[^/.]+$/, '').trim();
       const res = await createImport({
         filePath: uploadedFile.filePath,
         fileName: uploadedFile.fileName,
         fileSize: uploadedFile.fileSize,
         type: 'STOCK_RECEIPTS',
+        documentTitle: finalDocTitle,
         mapping: {
-          skuField: mapping.skuField || '',
-          nameField: mapping.nameField || '',
-          quantityField: mapping.quantityField,
-          quantityArrivedField: mapping.quantityField,
-          priceField: mapping.priceField,
-          salesPriceField: mapping.priceField,
-          purchasePriceField: mapping.priceField,
+          codeField: mapping.codeField || mapping.skuField || '',
+          skuField: mapping.skuField || mapping.codeField || '',
+          partNumberField: mapping.partNumberField || mapping.nameField || '',
+          nameField: mapping.nameField || mapping.partNumberField || '',
+          descriptionField: mapping.descriptionField || '',
+          costField: mapping.costField || '',
+          purchasePriceField: mapping.costField || '',
+          dealerPriceField: mapping.dealerPriceField || '',
+          endUserPriceField: mapping.endUserPriceField || mapping.priceField || '',
+          salesPriceField: mapping.endUserPriceField || mapping.priceField || '',
+          qtyInStockField: mapping.qtyInStockField || mapping.quantityField || '',
+          quantityArrivedField: mapping.qtyInStockField || mapping.quantityField || '',
+          quantityField: mapping.qtyInStockField || mapping.quantityField || '',
+          qtyOnOrderField: mapping.qtyOnOrderField || '',
+          priceField: mapping.endUserPriceField || mapping.priceField || '',
           barcodeField: mapping.barcodeField,
-          defaultStoreId: 1,
+          defaultStoreId: 62,
+          documentTitle: finalDocTitle,
         },
         importMode,
       });
@@ -238,10 +252,14 @@ export default function InventoryImport() {
   };
 
   const mappedSummary = useMemo(() => [
-    { label: 'Product Name', key: 'nameField', val: mapping.nameField, required: true },
-    { label: 'SKU / Product Code', key: 'skuField', val: mapping.skuField, required: true },
-    { label: 'Stock Quantity', key: 'quantityField', val: mapping.quantityField, required: false },
-    { label: 'Price', key: 'priceField', val: mapping.priceField, required: false },
+    { label: 'CODE (Unique Identifier)', key: 'codeField', val: mapping.codeField || mapping.skuField, required: true },
+    { label: 'PART NUMBER (Product Title)', key: 'partNumberField', val: mapping.partNumberField || mapping.nameField, required: true },
+    { label: 'DESCRIPTION (Mandatory Description)', key: 'descriptionField', val: mapping.descriptionField, required: true },
+    { label: 'QTY IN STOCK (Inventory Quantity)', key: 'qtyInStockField', val: mapping.qtyInStockField || mapping.quantityField, required: false },
+    { label: 'QTY ON ORDER (Ordered Quantity)', key: 'qtyOnOrderField', val: mapping.qtyOnOrderField, required: false },
+    { label: 'COST (Purchasing Price)', key: 'costField', val: mapping.costField, required: false },
+    { label: 'DEALER PRICE (Dealer Price Type)', key: 'dealerPriceField', val: mapping.dealerPriceField, required: false },
+    { label: 'END USER PRICE (End User Price Type)', key: 'endUserPriceField', val: mapping.endUserPriceField || mapping.priceField, required: false },
     { label: 'Barcode', key: 'barcodeField', val: mapping.barcodeField, required: false },
   ], [mapping]);
 
@@ -301,6 +319,30 @@ export default function InventoryImport() {
             </div>
           ) : preview ? (
             <>
+              {/* Bitrix24 Document Title Configuration Card */}
+              <div className="card border-blue-200 bg-white space-y-2 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="block text-sm font-bold text-gray-900">
+                      Bitrix24 Stock Document Name
+                    </label>
+                    <p className="text-xs text-gray-500">
+                      Specify the name that will appear on this Stock Receipt / Adjustment document in Bitrix24.
+                    </p>
+                  </div>
+                  <span className="text-[11px] px-2 py-0.5 bg-blue-50 text-blue-700 rounded font-medium border border-blue-200">
+                    Editable
+                  </span>
+                </div>
+                <input
+                  type="text"
+                  value={documentTitle}
+                  onChange={(e) => setDocumentTitle(e.target.value)}
+                  placeholder="e.g. CRM-STOCKLIST or Daily Stock Arrival"
+                  className="input-field text-sm font-medium text-gray-900 border-gray-300 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+
               {/* Auto-Mapping Card */}
               <div className="card border-blue-100 bg-blue-50/40 space-y-4">
                 <div className="flex items-center justify-between">
@@ -340,13 +382,13 @@ export default function InventoryImport() {
                 {showMappingAdjust && (
                   <div className="mt-4 pt-4 border-t border-blue-200/60 bg-white p-4 rounded-lg space-y-3">
                     <h4 className="text-xs font-bold text-gray-700 uppercase tracking-wider">Manual Column Override</h4>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 text-xs">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 text-xs">
                       <div>
-                        <label className="block font-medium text-gray-700 mb-1">Product Name Column *</label>
+                        <label className="block font-medium text-gray-700 mb-1">CODE (Unique Identifier) *</label>
                         <select
                           className="input-field text-xs py-1"
-                          value={mapping.nameField || ''}
-                          onChange={(e) => setMapping(prev => ({ ...prev, nameField: e.target.value }))}
+                          value={mapping.codeField || mapping.skuField || ''}
+                          onChange={(e) => setMapping(prev => ({ ...prev, codeField: e.target.value, skuField: e.target.value }))}
                         >
                           <option value="">-- Select Column --</option>
                           {preview.headers.map(h => <option key={h} value={h}>{h}</option>)}
@@ -354,11 +396,11 @@ export default function InventoryImport() {
                       </div>
 
                       <div>
-                        <label className="block font-medium text-gray-700 mb-1">SKU / Code Column *</label>
+                        <label className="block font-medium text-gray-700 mb-1">PART NUMBER (Product Title) *</label>
                         <select
                           className="input-field text-xs py-1"
-                          value={mapping.skuField || ''}
-                          onChange={(e) => setMapping(prev => ({ ...prev, skuField: e.target.value }))}
+                          value={mapping.partNumberField || mapping.nameField || ''}
+                          onChange={(e) => setMapping(prev => ({ ...prev, partNumberField: e.target.value, nameField: e.target.value }))}
                         >
                           <option value="">-- Select Column --</option>
                           {preview.headers.map(h => <option key={h} value={h}>{h}</option>)}
@@ -366,11 +408,23 @@ export default function InventoryImport() {
                       </div>
 
                       <div>
-                        <label className="block font-medium text-gray-700 mb-1">Stock Quantity Column</label>
+                        <label className="block font-medium text-gray-700 mb-1">DESCRIPTION (Mandatory) *</label>
                         <select
                           className="input-field text-xs py-1"
-                          value={mapping.quantityField || ''}
-                          onChange={(e) => setMapping(prev => ({ ...prev, quantityField: e.target.value }))}
+                          value={mapping.descriptionField || ''}
+                          onChange={(e) => setMapping(prev => ({ ...prev, descriptionField: e.target.value }))}
+                        >
+                          <option value="">-- Select Column --</option>
+                          {preview.headers.map(h => <option key={h} value={h}>{h}</option>)}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block font-medium text-gray-700 mb-1">QTY IN STOCK</label>
+                        <select
+                          className="input-field text-xs py-1"
+                          value={mapping.qtyInStockField || mapping.quantityField || ''}
+                          onChange={(e) => setMapping(prev => ({ ...prev, qtyInStockField: e.target.value, quantityField: e.target.value }))}
                         >
                           <option value="">-- None / Skip --</option>
                           {preview.headers.map(h => <option key={h} value={h}>{h}</option>)}
@@ -378,11 +432,11 @@ export default function InventoryImport() {
                       </div>
 
                       <div>
-                        <label className="block font-medium text-gray-700 mb-1">Price Column</label>
+                        <label className="block font-medium text-gray-700 mb-1">QTY ON ORDER</label>
                         <select
                           className="input-field text-xs py-1"
-                          value={mapping.priceField || ''}
-                          onChange={(e) => setMapping(prev => ({ ...prev, priceField: e.target.value }))}
+                          value={mapping.qtyOnOrderField || ''}
+                          onChange={(e) => setMapping(prev => ({ ...prev, qtyOnOrderField: e.target.value }))}
                         >
                           <option value="">-- None / Skip --</option>
                           {preview.headers.map(h => <option key={h} value={h}>{h}</option>)}
@@ -390,11 +444,35 @@ export default function InventoryImport() {
                       </div>
 
                       <div>
-                        <label className="block font-medium text-gray-700 mb-1">Barcode Column</label>
+                        <label className="block font-medium text-gray-700 mb-1">COST (Purchasing Price)</label>
                         <select
                           className="input-field text-xs py-1"
-                          value={mapping.barcodeField || ''}
-                          onChange={(e) => setMapping(prev => ({ ...prev, barcodeField: e.target.value }))}
+                          value={mapping.costField || ''}
+                          onChange={(e) => setMapping(prev => ({ ...prev, costField: e.target.value }))}
+                        >
+                          <option value="">-- None / Skip --</option>
+                          {preview.headers.map(h => <option key={h} value={h}>{h}</option>)}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block font-medium text-gray-700 mb-1">DEALER PRICE</label>
+                        <select
+                          className="input-field text-xs py-1"
+                          value={mapping.dealerPriceField || ''}
+                          onChange={(e) => setMapping(prev => ({ ...prev, dealerPriceField: e.target.value }))}
+                        >
+                          <option value="">-- None / Skip --</option>
+                          {preview.headers.map(h => <option key={h} value={h}>{h}</option>)}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block font-medium text-gray-700 mb-1">END USER PRICE</label>
+                        <select
+                          className="input-field text-xs py-1"
+                          value={mapping.endUserPriceField || mapping.priceField || ''}
+                          onChange={(e) => setMapping(prev => ({ ...prev, endUserPriceField: e.target.value, priceField: e.target.value }))}
                         >
                           <option value="">-- None / Skip --</option>
                           {preview.headers.map(h => <option key={h} value={h}>{h}</option>)}
@@ -464,24 +542,50 @@ export default function InventoryImport() {
               </select>
             </div>
 
+            {/* Bitrix24 Document Name Configuration in Step 2 */}
+            <div className="bg-white rounded-lg p-4 space-y-2 border border-blue-200 shadow-sm">
+              <div className="flex items-center justify-between">
+                <label className="block text-sm font-bold text-gray-900">
+                  Bitrix24 Document Title / Name
+                </label>
+                <span className="text-[11px] px-2 py-0.5 bg-blue-50 text-blue-700 rounded font-medium border border-blue-200">
+                  Editable
+                </span>
+              </div>
+              <input
+                type="text"
+                value={documentTitle}
+                onChange={(e) => setDocumentTitle(e.target.value)}
+                placeholder="e.g. CRM-STOCKLIST or Daily Stock Arrival"
+                className="input-field text-sm font-medium text-gray-900 border-gray-300"
+              />
+              <p className="text-xs text-gray-500">
+                This exact name will be assigned to the Stock Receipt / Adjustment document in Bitrix24.
+              </p>
+            </div>
+
             {/* Import Summary */}
             <div className="bg-gray-50 rounded-lg p-4 space-y-3 border border-gray-200">
               <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wider">Import Overview</h3>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 text-sm">
                 <div>
                   <span className="text-xs text-gray-500 block">File Name</span>
                   <span className="font-semibold text-gray-900 truncate block">{preview.fileName}</span>
+                </div>
+                <div>
+                  <span className="text-xs text-gray-500 block">Document Title</span>
+                  <span className="font-semibold text-blue-700 truncate block">{documentTitle || preview.fileName.replace(/\.[^/.]+$/, '')}</span>
                 </div>
                 <div>
                   <span className="text-xs text-gray-500 block">Total Items</span>
                   <span className="font-semibold text-gray-900">{preview.totalRows.toLocaleString()} rows</span>
                 </div>
                 <div>
-                  <span className="text-xs text-gray-500 block">Product Name Column</span>
+                  <span className="text-xs text-gray-500 block">Product Column</span>
                   <span className="font-semibold text-blue-700">{mapping.nameField || 'None'}</span>
                 </div>
                 <div>
-                  <span className="text-xs text-gray-500 block">SKU / Code Column</span>
+                  <span className="text-xs text-gray-500 block">Code Column</span>
                   <span className="font-semibold text-blue-700">{mapping.skuField || 'None'}</span>
                 </div>
               </div>

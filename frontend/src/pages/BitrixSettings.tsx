@@ -6,6 +6,12 @@ import {
   saveBitrixSettings,
   testBitrixConnection,
 } from '../services/settings.api';
+import {
+  getDailySchedule,
+  updateDailySchedule,
+  triggerDailyImport,
+} from '../services/import.api';
+import type { DailyScheduleConfig } from '../types';
 
 interface FormData {
   portalUrl: string;
@@ -20,6 +26,26 @@ export default function BitrixSettings() {
   const [connectionStatus, setConnectionStatus] = useState('UNKNOWN');
   const [lastTestedAt, setLastTestedAt] = useState<string | null>(null);
   const { register, handleSubmit, setValue, formState: { errors } } = useForm<FormData>();
+
+  // Daily Schedule state
+  const [scheduleConfig, setScheduleConfig] = useState<DailyScheduleConfig | null>(null);
+  const [scheduleTime, setScheduleTime] = useState('02:00');
+  const [scheduleEnabled, setScheduleEnabled] = useState(true);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [triggeringDaily, setTriggeringDaily] = useState(false);
+
+  const loadDailySchedule = async () => {
+    try {
+      const res = await getDailySchedule();
+      if (res.success && res.data) {
+        setScheduleConfig(res.data);
+        setScheduleTime(res.data.timeOfDay || '02:00');
+        setScheduleEnabled(res.data.enabled ?? true);
+      }
+    } catch {
+      // ignore
+    }
+  };
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -38,6 +64,7 @@ export default function BitrixSettings() {
       }
     };
     loadSettings();
+    loadDailySchedule();
   }, [setValue]);
 
   const onSubmit = async (data: FormData) => {
@@ -77,6 +104,43 @@ export default function BitrixSettings() {
       setConnectionStatus('FAILED');
     } finally {
       setTesting(false);
+    }
+  };
+
+  const handleSaveSchedule = async () => {
+    setSavingSchedule(true);
+    try {
+      const res = await updateDailySchedule({
+        enabled: scheduleEnabled,
+        timeOfDay: scheduleTime,
+      });
+      if (res.success) {
+        toast.success('Daily import schedule updated');
+        loadDailySchedule();
+      } else {
+        toast.error('Failed to update schedule');
+      }
+    } catch {
+      toast.error('Error saving schedule');
+    } finally {
+      setSavingSchedule(false);
+    }
+  };
+
+  const handleTriggerDailyNow = async () => {
+    setTriggeringDaily(true);
+    try {
+      const res = await triggerDailyImport();
+      if (res.success) {
+        toast.success(res.message || 'Daily import enqueued successfully!');
+        loadDailySchedule();
+      } else {
+        toast.error(res.message || 'No pending inventory files found in feed folder.');
+      }
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || 'Error triggering daily import');
+    } finally {
+      setTriggeringDaily(false);
     }
   };
 
@@ -165,6 +229,93 @@ export default function BitrixSettings() {
           <strong>Note:</strong> You must configure a valid Bitrix webhook URL to import products/inventory. The webhook is stored securely (encrypted) in our database and is never exposed to the frontend.
         </div>
       )}
+
+      {/* Automated Daily Import Schedule Card (Requirement 1) */}
+      <div className="card space-y-4">
+        <div className="border-b border-gray-200 pb-3">
+          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+            <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            Automated Daily Import Schedule (Requirement 1)
+          </h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Configures the automated daily inventory feed. Drop your daily Excel spreadsheet into the feed folder, and the middleware imports it automatically.
+          </p>
+        </div>
+
+        <div className="space-y-4 text-sm">
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="font-medium text-gray-700 block">Daily Scheduled Execution</span>
+              <span className="text-xs text-gray-500">Automatically trigger once every day at specified time</span>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={scheduleEnabled}
+                onChange={(e) => setScheduleEnabled(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Execution Time (24h format)</label>
+              <input
+                type="time"
+                value={scheduleTime}
+                onChange={(e) => setScheduleTime(e.target.value)}
+                className="input-field"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Files Waiting in Feed</label>
+              <div className="px-3 py-2 bg-gray-50 rounded border text-xs font-mono flex items-center justify-between">
+                <span>{scheduleConfig?.feedFileCount ?? 0} file(s) waiting</span>
+                <span className="text-gray-400">uploads/daily_feed/</span>
+              </div>
+            </div>
+          </div>
+
+          {scheduleConfig?.lastRunAt && (
+            <div className="p-3 bg-gray-50 rounded text-xs text-gray-600 flex justify-between items-center">
+              <div>
+                <strong>Last Run:</strong> {new Date(scheduleConfig.lastRunAt).toLocaleString()}
+                {scheduleConfig.lastFileName && <span className="ml-1 text-gray-500">({scheduleConfig.lastFileName})</span>}
+              </div>
+              <span className={`px-2 py-0.5 rounded font-bold text-[10px] ${
+                scheduleConfig.lastRunStatus === 'QUEUED' ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-700'
+              }`}>
+                {scheduleConfig.lastRunStatus || 'IDLE'}
+              </span>
+            </div>
+          )}
+
+          <div className="flex gap-3 pt-2">
+            <button
+              type="button"
+              onClick={handleSaveSchedule}
+              disabled={savingSchedule}
+              className="btn-primary"
+            >
+              {savingSchedule ? 'Saving...' : 'Update Schedule'}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleTriggerDailyNow}
+              disabled={triggeringDaily}
+              className="btn-secondary"
+            >
+              {triggeringDaily ? 'Triggering...' : 'Run Daily Import Now'}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
+
