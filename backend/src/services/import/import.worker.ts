@@ -451,6 +451,20 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
                 id: Number(bitrixDocumentId),
                 fields: docFields,
               });
+
+              if (docFields.commentary) {
+                try {
+                  await client.callMethod('crm.timeline.comment.add', {
+                    fields: {
+                      ENTITY_ID: Number(bitrixDocumentId),
+                      ENTITY_TYPE: 'store_document',
+                      COMMENT: docFields.commentary,
+                    },
+                  });
+                } catch (timelineErr: any) {
+                  logger.warn({ err: timelineErr }, 'Failed to add timeline comment to store document');
+                }
+              }
             }
           }
         } catch (totErr: any) {
