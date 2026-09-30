@@ -192,6 +192,7 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
     });
 
     let bitrixDocumentId: number | undefined;
+    let existingDocId: number | undefined;
     let storesList: BitrixStore[] = [];
     const customTitle = (effectiveMapping && (effectiveMapping as any).documentTitle && String((effectiveMapping as any).documentTitle).trim()) ||
                         (importJob.mappingJson && (importJob.mappingJson as any).documentTitle && String((importJob.mappingJson as any).documentTitle).trim()) ||
@@ -207,37 +208,59 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
         storesList = await stockReceiptService.getStores();
 
         if (importJob.bitrixDocumentId) {
-          try {
-            const check = await client.callMethod('catalog.document.list', { filter: { id: Number(importJob.bitrixDocumentId) } });
-            const d = (check?.documents || [])[0];
-            if (d && d.status === 'Y') {
-              const doc = await stockReceiptService.createStockReceiptDocument(
-                `${docTitle} (Retry)`,
-                `Retried items for Job: ${importJobId}`
-              );
-              bitrixDocumentId = doc.id;
-              await prisma.importJob.update({
-                where: { id: importJobId },
-                data: { bitrixDocumentId: String(bitrixDocumentId) },
-              });
-              logger.info(`Created new supplementary stock receipt doc ID ${bitrixDocumentId} for retried items`);
-            } else {
-              bitrixDocumentId = Number(importJob.bitrixDocumentId);
+          const rawDocId = Number(String(importJob.bitrixDocumentId).replace(/\D+/g, ''));
+          if (rawDocId && !isNaN(rawDocId)) {
+            try {
+              const check = await client.callMethod('catalog.document.list', { filter: { id: rawDocId } });
+              const d = (check?.documents || [])[0];
+              if (d && d.status === 'Y') {
+                logger.info(`Job ${importJobId} references conducted document #${rawDocId}. Skipping new document creation; updating Product Catalog directly.`);
+                existingDocId = rawDocId;
+                bitrixDocumentId = undefined;
+              } else if (d) {
+                bitrixDocumentId = rawDocId;
+              }
+            } catch {
+              bitrixDocumentId = undefined;
             }
-          } catch {
-            bitrixDocumentId = Number(importJob.bitrixDocumentId);
           }
         } else {
-          const doc = await stockReceiptService.createStockReceiptDocument(
-            docTitle,
-            `Imported via Bitrix24 Middleware (Job: ${importJobId})`
-          );
-          bitrixDocumentId = doc.id;
-          await prisma.importJob.update({
-            where: { id: importJobId },
-            data: { bitrixDocumentId: String(bitrixDocumentId) },
-          });
-          logger.info(`Created Bitrix stock receipt document ID ${bitrixDocumentId} with title: "${docTitle}" for job ${importJobId}`);
+          // Option A: Check if a document with this title already exists in Bitrix24
+          try {
+            const checkTitle = await client.callMethod('catalog.document.list', {
+              filter: { title: docTitle },
+              order: { id: 'desc' },
+            });
+            const found = (checkTitle?.documents || []).find((d: any) =>
+              (d.title || '').trim().toLowerCase() === docTitle.trim().toLowerCase()
+            );
+            if (found && found.id) {
+              existingDocId = Number(found.id);
+            }
+          } catch (chkErr: any) {
+            logger.warn({ err: chkErr?.message }, `Failed to query existing document by title: ${docTitle}`);
+          }
+
+          if (existingDocId) {
+            logger.info(`Option A: Document with title "${docTitle}" already exists in Bitrix24 (ID #${existingDocId}). Skipping creation in Inventory Management; updating Product Catalog and store stock directly.`);
+            debugLog.info('WORKER', `Document "${docTitle}" already exists (ID #${existingDocId}). Skipping document creation in Inventory Management; updating Product Catalog directly.`);
+            bitrixDocumentId = undefined;
+            await prisma.importJob.update({
+              where: { id: importJobId },
+              data: { bitrixDocumentId: `${existingDocId} (Existing - Skipped)` },
+            });
+          } else {
+            const doc = await stockReceiptService.createStockReceiptDocument(
+              docTitle,
+              `Imported via Bitrix24 Middleware (Job: ${importJobId})`
+            );
+            bitrixDocumentId = doc.id;
+            await prisma.importJob.update({
+              where: { id: importJobId },
+              data: { bitrixDocumentId: String(bitrixDocumentId) },
+            });
+            logger.info(`Created Bitrix stock receipt document ID ${bitrixDocumentId} with title: "${docTitle}" for job ${importJobId}`);
+          }
         }
       } catch (docErr: any) {
         logger.warn({ err: docErr }, 'Failed to initialize Bitrix stock receipt document; continuing with catalog sync');
@@ -481,6 +504,21 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
         }
       } catch (err: any) {
         logger.warn({ err }, 'Error during stock receipt document conducting');
+      }
+    }
+
+    if (existingDocId && hasInventoryStock) {
+      try {
+        const client = await BitrixClient.fromDbConfiguration();
+        await client.callMethod('crm.timeline.comment.add', {
+          fields: {
+            ENTITY_ID: Number(existingDocId),
+            ENTITY_TYPE: 'store_document',
+            COMMENT: `📦 Stock & Prices re-synchronized from import "${docTitle}" on ${new Date().toLocaleString()}.\nProduct Catalog items and store quantities updated directly.`,
+          },
+        });
+      } catch (tErr: any) {
+        logger.warn({ err: tErr?.message }, 'Failed to add update comment to existing store document');
       }
     }
 
