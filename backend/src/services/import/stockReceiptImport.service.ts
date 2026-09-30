@@ -138,7 +138,7 @@ export class StockReceiptImportService {
           resolvedStoreId = mainStore ? mainStore.id : storesList[0].id;
         }
       }
-      if (!resolvedStoreId || resolvedStoreId === 1) resolvedStoreId = 62;
+      if (!resolvedStoreId) resolvedStoreId = 1;
 
       // Step 1: Product Matching
       // Requirement 2: Match by CODE

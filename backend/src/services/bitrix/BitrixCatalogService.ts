@@ -1069,9 +1069,30 @@ export class BitrixProductService {
       if (input.cost !== undefined && input.cost !== null && !isNaN(Number(input.cost))) {
         catFields.purchasingPrice = Number(input.cost);
         catFields.purchasingCurrency = this.context.currency;
+        this.context.costPropertyIds?.forEach(propId => {
+          catFields[`property${propId}`] = { value: String(input.cost) };
+        });
       }
       if (input.qtyInStock !== undefined && input.qtyInStock !== null && !isNaN(Number(input.qtyInStock))) {
         catFields.quantity = Number(input.qtyInStock);
+        this.context.stockQtyPropertyIds?.forEach(propId => {
+          catFields[`property${propId}`] = { value: String(input.qtyInStock) };
+        });
+      }
+      if (input.qtyOnOrder !== undefined && input.qtyOnOrder !== null && !isNaN(Number(input.qtyOnOrder))) {
+        this.context.qtyOnOrderPropertyIds?.forEach(propId => {
+          catFields[`property${propId}`] = { value: Number(input.qtyOnOrder) };
+        });
+      }
+      if (input.dealerPrice !== undefined && input.dealerPrice !== null && !isNaN(Number(input.dealerPrice))) {
+        this.context.dealerPricePropertyIds?.forEach(propId => {
+          catFields[`property${propId}`] = { value: String(input.dealerPrice) };
+        });
+      }
+      if (input.endUserPrice !== undefined && input.endUserPrice !== null && !isNaN(Number(input.endUserPrice))) {
+        this.context.endUserPricePropertyIds?.forEach(propId => {
+          catFields[`property${propId}`] = { value: String(input.endUserPrice) };
+        });
       }
       await this.client.callMethod('catalog.product.update', {
         id: productId,

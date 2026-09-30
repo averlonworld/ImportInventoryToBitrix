@@ -194,13 +194,13 @@ export class BitrixStockReceiptService {
       }
 
       let targetStore = (storeTo !== undefined && storeTo !== null && Number(storeTo) > 0) ? Number(storeTo) : 0;
-      if (targetStore <= 0 || targetStore === 1) {
+      if (targetStore <= 0) {
         try {
           const stores = await this.getStores();
           const main = stores.find(s => s.title.toLowerCase().includes('main') || s.id === 62) || stores[0];
-          targetStore = main ? main.id : 62;
+          targetStore = main ? main.id : 1;
         } catch {
-          targetStore = 62;
+          targetStore = 1;
         }
       }
 
@@ -253,7 +253,7 @@ export class BitrixStockReceiptService {
 
   async syncDirectStoreStock(productId: number, storeId: number, amount: number): Promise<boolean> {
     try {
-      const targetStoreId = (storeId !== undefined && storeId !== null && Number(storeId) > 0 && Number(storeId) !== 1) ? Number(storeId) : 62;
+      let targetStoreId = (storeId !== undefined && storeId !== null && Number(storeId) > 0) ? Number(storeId) : 1;
       const listRes = await this.client.callMethod('catalog.storeproduct.list', {
         filter: { productId: Number(productId), storeId: Number(targetStoreId) },
       });
