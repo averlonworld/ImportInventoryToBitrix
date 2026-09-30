@@ -4,6 +4,13 @@
 -- Description: Complete DDL script for database creation, tables, constraints,
 --              foreign keys, indexes, and default administrator seed record.
 -- Database Target: PostgreSQL 14+ / 15+
+--
+-- Entity Relationships (ERD):
+--   [User] 1 --------< 0..* [BitrixConfiguration] (Per-user Bitrix24 portal credentials)
+--   [User] 1 --------< 0..* [ImportJob]           (Per-user Excel import jobs)
+--   [User] 1 --------< 0..* [ColumnMapping]       (Per-user saved column mappings)
+--   [ImportJob] 1 ---< 0..* [ImportRecord]        (Row-level records & error audits)
+--   [DebugLog]                                    (System-wide event & diagnostic logs)
 -- ==============================================================================
 
 -- Enable UUID extension for generating UUID primary keys
@@ -34,7 +41,10 @@ CREATE TABLE IF NOT EXISTS "BitrixConfiguration" (
     "lastTestedAt" TIMESTAMP(3) WITH TIME ZONE,
     "connectionStatus" VARCHAR(50) NOT NULL DEFAULT 'UNKNOWN',
     "createdAt" TIMESTAMP(3) WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "updatedAt" TIMESTAMP(3) WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdById" UUID,
+    CONSTRAINT "fk_bitrixconfiguration_user" FOREIGN KEY ("createdById") 
+        REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
 
 -- ==============================================================================
@@ -129,6 +139,10 @@ CREATE TABLE IF NOT EXISTS "DebugLog" (
 -- ==============================================================================
 -- Indexes for High Throughput & Fast Querying
 -- ==============================================================================
+CREATE INDEX IF NOT EXISTS "idx_bitrixconfig_createdbyid" ON "BitrixConfiguration"("createdById");
+CREATE INDEX IF NOT EXISTS "idx_importjob_createdbyid" ON "ImportJob"("createdById");
+CREATE INDEX IF NOT EXISTS "idx_columnmapping_createdbyid" ON "ColumnMapping"("createdById");
+
 CREATE INDEX IF NOT EXISTS "idx_importrecord_jobid" ON "ImportRecord"("importJobId");
 CREATE INDEX IF NOT EXISTS "idx_importrecord_status" ON "ImportRecord"("status");
 CREATE INDEX IF NOT EXISTS "idx_importrecord_sku" ON "ImportRecord"("sku");
@@ -139,7 +153,7 @@ CREATE INDEX IF NOT EXISTS "idx_debuglog_source" ON "DebugLog"("source");
 CREATE INDEX IF NOT EXISTS "idx_debuglog_createdat" ON "DebugLog"("createdAt");
 
 -- ==============================================================================
--- 7. Seed Data: Default Administrator User Creation
+-- 7. Seed Data: Default Administrator User Creation & Initial Assignment
 -- ==============================================================================
 -- Default Credentials:
 -- Email:    admin@system.com
@@ -167,6 +181,11 @@ ON CONFLICT ("email") DO UPDATE SET
     "role" = 'ADMIN',
     "isActive" = TRUE,
     "updatedAt" = CURRENT_TIMESTAMP;
+
+-- Backfill unassigned Bitrix configuration to the default administrator
+UPDATE "BitrixConfiguration"
+SET "createdById" = (SELECT "id" FROM "User" WHERE "email" = 'admin@system.com' LIMIT 1)
+WHERE "createdById" IS NULL;
 
 -- ==============================================================================
 -- End of Schema Definition
