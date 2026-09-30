@@ -74,7 +74,8 @@ export class StockReceiptImportService {
     mapping: StockReceiptMapping,
     importMode: string,
     bitrixDocumentId?: number,
-    storesList?: BitrixStore[]
+    storesList?: BitrixStore[],
+    clientOrUserId?: BitrixClient | string
   ): Promise<StockReceiptResult> {
     const code = (rowData.code || rowData.sku || '').trim();
     const partNumber = (rowData.partNumber || rowData.name || '').trim();
@@ -98,7 +99,9 @@ export class StockReceiptImportService {
     }
 
     try {
-      const client = await BitrixClient.fromDbConfiguration();
+      const client = clientOrUserId instanceof BitrixClient
+        ? clientOrUserId
+        : await BitrixClient.fromDbConfiguration(clientOrUserId);
       const catalogService = new BitrixCatalogService(client);
       const stockReceiptService = new BitrixStockReceiptService(client);
       const context = await catalogService.getCatalogContext();

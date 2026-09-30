@@ -38,7 +38,8 @@ export class InvoiceImportService {
       dueDateField?: string;
       commentField?: string;
     },
-    importMode: string
+    importMode: string,
+    clientOrUserId?: BitrixClient | string
   ): Promise<InvoiceResult> {
     const accountNumber = rowData.accountNumber;
 
@@ -47,7 +48,9 @@ export class InvoiceImportService {
     }
 
     try {
-      const client = await BitrixClient.fromDbConfiguration();
+      const client = clientOrUserId instanceof BitrixClient
+        ? clientOrUserId
+        : await BitrixClient.fromDbConfiguration(clientOrUserId);
       const invoiceService = new BitrixInvoiceService(client);
 
       const { fields, unsupported } = BitrixInvoiceService.normalizeFields({

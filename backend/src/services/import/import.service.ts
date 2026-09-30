@@ -24,7 +24,8 @@ export class ImportService {
   async processRecord(
     rowData: ImportRowData,
     mapping: { skuField: string; nameField: string; quantityField?: string; priceField?: string; barcodeField?: string; },
-    importMode: string
+    importMode: string,
+    clientOrUserId?: BitrixClient | string
   ): Promise<ImportResult> {
     const sku = (rowData.sku || '').trim();
     const name = (rowData.name || '').trim();
@@ -40,7 +41,9 @@ export class ImportService {
     }
 
     try {
-      const client = await BitrixClient.fromDbConfiguration();
+      const client = clientOrUserId instanceof BitrixClient
+        ? clientOrUserId
+        : await BitrixClient.fromDbConfiguration(clientOrUserId);
       const catalogService = new BitrixCatalogService(client);
       const context = await catalogService.getCatalogContext();
       const productService = new BitrixProductService(client, context);

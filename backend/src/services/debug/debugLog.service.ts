@@ -2,7 +2,7 @@ import { prisma } from '../../config/database';
 import { logger } from '../../utils/logger';
 
 export type DebugLogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
-export type DebugSource = 'SYSTEM' | 'API' | 'AUTH' | 'SETTINGS' | 'BITRIX' | 'IMPORT' | 'WORKER';
+export type DebugSource = 'SYSTEM' | 'API' | 'AUTH' | 'SETTINGS' | 'BITRIX' | 'IMPORT' | 'WORKER' | 'LICENTIC';
 
 export interface DebugLogDetails {
   [key: string]: any;

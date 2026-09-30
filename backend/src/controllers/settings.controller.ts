@@ -14,12 +14,15 @@ interface BitrixSettingsInput {
 }
 
 export class SettingsController {
-  async getBitrixSettings(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  async getBitrixSettings(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const config = await prisma.bitrixConfiguration.findFirst({
-        where: { isActive: true },
-        orderBy: { updatedAt: 'desc' },
-      });
+      const userId = req.user?.id;
+      const config = userId
+        ? await prisma.bitrixConfiguration.findFirst({
+            where: { createdById: userId, isActive: true },
+            orderBy: { updatedAt: 'desc' },
+          })
+        : null;
 
       res.json({
         success: true,
@@ -38,6 +41,7 @@ export class SettingsController {
 
   async saveBitrixSettings(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
+      const userId = req.user?.id;
       const { portalUrl, webhookUrl, isActive } = req.body as BitrixSettingsInput;
 
       if (!portalUrl) {
@@ -54,9 +58,11 @@ export class SettingsController {
 
       const webhookEncrypted = webhookUrl ? encrypt(webhookUrl.trim()) : undefined;
 
-      const existing = await prisma.bitrixConfiguration.findFirst({
-        where: { isActive: true },
-      });
+      const existing = userId
+        ? await prisma.bitrixConfiguration.findFirst({
+            where: { createdById: userId, isActive: true },
+          })
+        : null;
 
       let config;
       if (existing) {
@@ -69,17 +75,21 @@ export class SettingsController {
           },
         });
       } else {
+        if (!webhookEncrypted) {
+          throw new AppError('Webhook URL is required when creating Bitrix configuration', 400);
+        }
         config = await prisma.bitrixConfiguration.create({
           data: {
             portalUrl: portalUrl.trim(),
-            webhookUrlEncrypted: webhookEncrypted!,
+            webhookUrlEncrypted: webhookEncrypted,
             isActive: isActive ?? true,
             connectionStatus: 'UNKNOWN',
+            createdById: userId,
           },
         });
       }
 
-      logger.info('Bitrix configuration saved');
+      logger.info(`Bitrix configuration saved for user ${userId || 'unknown'}`);
       debugLog.info('SETTINGS', `Bitrix configuration ${existing ? 'updated' : 'saved'} for ${config.portalUrl}`);
 
       res.json({
@@ -97,12 +107,15 @@ export class SettingsController {
 
   async updateBitrixSettings(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
+      const userId = req.user?.id;
       const { portalUrl, webhookUrl, isActive } = req.body as BitrixSettingsInput;
 
-      const config = await prisma.bitrixConfiguration.findFirst({
-        where: { isActive: true },
-        orderBy: { updatedAt: 'desc' },
-      });
+      const config = userId
+        ? await prisma.bitrixConfiguration.findFirst({
+            where: { createdById: userId, isActive: true },
+            orderBy: { updatedAt: 'desc' },
+          })
+        : null;
 
       if (!config) {
         throw new AppError('No Bitrix configuration exists to update', 404);
@@ -142,9 +155,12 @@ export class SettingsController {
 
   async deleteBitrixSettings(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const config = await prisma.bitrixConfiguration.findFirst({
-        where: { isActive: true },
-      });
+      const userId = req.user?.id;
+      const config = userId
+        ? await prisma.bitrixConfiguration.findFirst({
+            where: { createdById: userId, isActive: true },
+          })
+        : null;
 
       if (config) {
         await prisma.bitrixConfiguration.update({
@@ -153,7 +169,7 @@ export class SettingsController {
         });
       }
 
-      debugLog.info('SETTINGS', 'Bitrix configuration deleted/deactivated');
+      debugLog.info('SETTINGS', `Bitrix configuration deleted/deactivated for user ${userId || 'unknown'}`);
 
       res.json({ success: true, message: 'Bitrix configuration deleted' });
     } catch (error) {
@@ -161,12 +177,15 @@ export class SettingsController {
     }
   }
 
-  async testBitrixConnection(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  async testBitrixConnection(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    const userId = req.user?.id;
     try {
-      const config = await prisma.bitrixConfiguration.findFirst({
-        where: { isActive: true },
-        orderBy: { updatedAt: 'desc' },
-      });
+      const config = userId
+        ? await prisma.bitrixConfiguration.findFirst({
+            where: { createdById: userId, isActive: true },
+            orderBy: { updatedAt: 'desc' },
+          })
+        : null;
 
       if (!config || !config.webhookUrlEncrypted) {
         throw new AppError('Bitrix webhook not configured. Please save your webhook first.', 400);
@@ -215,12 +234,14 @@ export class SettingsController {
     } catch (error) {
       // Update connection status on failure
       try {
-        const config = await prisma.bitrixConfiguration.findFirst({ where: { isActive: true } });
-        if (config) {
-          await prisma.bitrixConfiguration.update({
-            where: { id: config.id },
-            data: { connectionStatus: 'FAILED', lastTestedAt: new Date() },
-          });
+        if (userId) {
+          const config = await prisma.bitrixConfiguration.findFirst({ where: { createdById: userId, isActive: true } });
+          if (config) {
+            await prisma.bitrixConfiguration.update({
+              where: { id: config.id },
+              data: { connectionStatus: 'FAILED', lastTestedAt: new Date() },
+            });
+          }
         }
       } catch { /* ignore */ }
 

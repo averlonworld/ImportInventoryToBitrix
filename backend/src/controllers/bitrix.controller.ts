@@ -8,9 +8,9 @@ import { logger } from '../utils/logger';
 import { AppError } from '../middleware/error.middleware';
 
 export class BitrixController {
-  async getCatalogs(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  async getCatalogs(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const client = await BitrixClient.fromDbConfiguration();
+      const client = await BitrixClient.fromDbConfiguration(req.user?.id);
       const service = new BitrixCatalogService(client);
       const catalogs = await service.getCatalogs();
       res.json({ success: true, data: catalogs });
@@ -19,9 +19,9 @@ export class BitrixController {
     }
   }
 
-  async getProductFields(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  async getProductFields(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const client = await BitrixClient.fromDbConfiguration();
+      const client = await BitrixClient.fromDbConfiguration(req.user?.id);
       const service = new BitrixCatalogService(client);
       const fields = await service.getProductFields();
       res.json({ success: true, data: fields });
@@ -30,9 +30,9 @@ export class BitrixController {
     }
   }
 
-  async getInventoryFields(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  async getInventoryFields(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const client = await BitrixClient.fromDbConfiguration();
+      const client = await BitrixClient.fromDbConfiguration(req.user?.id);
       const service = new BitrixCatalogService(client);
       const fields = await service.getInventoryFields();
       res.json({ success: true, data: fields });
@@ -41,9 +41,9 @@ export class BitrixController {
     }
   }
 
-  async getStores(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  async getStores(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const client = await BitrixClient.fromDbConfiguration();
+      const client = await BitrixClient.fromDbConfiguration(req.user?.id);
       const service = new BitrixCatalogService(client);
       const stores = await service.getStores();
       res.json({ success: true, data: stores });
@@ -52,9 +52,9 @@ export class BitrixController {
     }
   }
 
-  async getEndpointInfo(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  async getEndpointInfo(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const client = await BitrixClient.fromDbConfiguration();
+      const client = await BitrixClient.fromDbConfiguration(req.user?.id);
       const test = await client.testConnection(client['instance']?.defaults?.baseURL || '');
       res.json({ success: true, data: { reachable: test } });
     } catch (error) {
@@ -76,10 +76,10 @@ export class BitrixController {
     }
   }
 
-  async getStockReceiptFields(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  async getStockReceiptFields(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       try {
-        const client = await BitrixClient.fromDbConfiguration();
+        const client = await BitrixClient.fromDbConfiguration(req.user?.id);
         const service = new BitrixStockReceiptService(client);
         const discovery = await service.getDiscoveryFields();
         res.json({
@@ -106,7 +106,7 @@ export class BitrixController {
 
   async getQuotationProducts(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const client = await BitrixClient.fromDbConfiguration();
+      const client = await BitrixClient.fromDbConfiguration(req.user?.id);
       const quotationService = new (await import('../services/bitrix/BitrixQuotationService')).BitrixQuotationService(client);
       const search = req.query.search ? String(req.query.search) : undefined;
       const limit = req.query.limit ? Number(req.query.limit) : 25;
@@ -123,7 +123,7 @@ export class BitrixController {
       if (!entityId) {
         throw new AppError('entityId is required', 400);
       }
-      const client = await BitrixClient.fromDbConfiguration();
+      const client = await BitrixClient.fromDbConfiguration(req.user?.id);
       const quotationService = new (await import('../services/bitrix/BitrixQuotationService')).BitrixQuotationService(client);
       const result = await quotationService.applyTierPricingToEntity(
         Number(entityId),

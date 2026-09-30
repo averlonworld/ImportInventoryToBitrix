@@ -25,9 +25,9 @@ export class BitrixClient {
     });
   }
 
-  static async fromDbConfiguration(): Promise<BitrixClient> {
+  static async fromDbConfiguration(userId?: string): Promise<BitrixClient> {
     const config = await prisma.bitrixConfiguration.findFirst({
-      where: { isActive: true },
+      where: userId ? { createdById: userId, isActive: true } : { isActive: true },
       orderBy: { updatedAt: 'desc' },
     });
 

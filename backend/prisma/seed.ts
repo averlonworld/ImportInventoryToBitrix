@@ -1,15 +1,12 @@
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcrypt';
-import dotenv from 'dotenv';
-import path from 'path';
-
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+import { env } from '../src/config/env';
 
 const prisma = new PrismaClient();
 
 async function main() {
-  const adminEmail = process.env.ADMIN_EMAIL || 'admin@system.com';
-  const adminPassword = process.env.ADMIN_PASSWORD || 'Admin@123456';
+  const adminEmail = env.ADMIN_EMAIL;
+  const adminPassword = env.ADMIN_PASSWORD;
 
   const passwordHash = await bcrypt.hash(adminPassword, 10);
 

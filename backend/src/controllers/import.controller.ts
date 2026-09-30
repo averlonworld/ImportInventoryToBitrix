@@ -307,12 +307,16 @@ export class ImportController {
     }
   }
 
-  async listImports(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async listImports(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { status, page = 1, limit = 20 } = req.query;
       const skip = (Number(page) - 1) * Number(limit);
+      const userId = req.user?.id;
 
-      const where = status && status !== 'ALL' ? { status: String(status) } : {};
+      const where: any = status && status !== 'ALL' ? { status: String(status) } : {};
+      if (userId) {
+        where.createdById = userId;
+      }
 
       const [imports, total] = await Promise.all([
         prisma.importJob.findMany({
@@ -341,12 +345,13 @@ export class ImportController {
     }
   }
 
-  async getImport(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async getImport(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = req.params;
+      const userId = req.user?.id;
 
-      const importJob = await prisma.importJob.findUnique({
-        where: { id },
+      const importJob = await prisma.importJob.findFirst({
+        where: { id, ...(userId ? { createdById: userId } : {}) },
         include: {
           createdBy: { select: { email: true } },
         },
@@ -380,9 +385,17 @@ export class ImportController {
     }
   }
 
-  async getErrors(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async getErrors(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = req.params;
+      const userId = req.user?.id;
+
+      const importJob = await prisma.importJob.findFirst({
+        where: { id, ...(userId ? { createdById: userId } : {}) },
+      });
+      if (!importJob) {
+        throw new AppError('Import job not found', 404);
+      }
 
       const errors = await prisma.importRecord.findMany({
         where: {
@@ -401,9 +414,17 @@ export class ImportController {
     }
   }
 
-  async getErrorReport(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async getErrorReport(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = req.params;
+      const userId = req.user?.id;
+
+      const importJob = await prisma.importJob.findFirst({
+        where: { id, ...(userId ? { createdById: userId } : {}) },
+      });
+      if (!importJob) {
+        throw new AppError('Import job not found', 404);
+      }
 
       const errors = await prisma.importRecord.findMany({
         where: {
@@ -437,8 +458,11 @@ export class ImportController {
   async retryFailedRecords(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = req.params;
+      const userId = req.user?.id;
 
-      const importJob = await prisma.importJob.findUnique({ where: { id } });
+      const importJob = await prisma.importJob.findFirst({
+        where: { id, ...(userId ? { createdById: userId } : {}) },
+      });
       if (!importJob) {
         throw new AppError('Import job not found', 404);
       }
@@ -498,9 +522,10 @@ export class ImportController {
     }
   }
 
-  async getImportRecords(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async getImportRecords(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = req.params;
+      const userId = req.user?.id;
       const {
         page = 1,
         limit = 50,
@@ -509,8 +534,8 @@ export class ImportController {
         errorType = 'ALL',
       } = req.query;
 
-      const importJob = await prisma.importJob.findUnique({
-        where: { id },
+      const importJob = await prisma.importJob.findFirst({
+        where: { id, ...(userId ? { createdById: userId } : {}) },
         include: { createdBy: { select: { email: true } } },
       });
 
@@ -656,9 +681,14 @@ export class ImportController {
   async retrySingleRecord(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id, recordId } = req.params;
+      const userId = req.user?.id;
 
       const record = await prisma.importRecord.findFirst({
-        where: { id: recordId, importJobId: id },
+        where: {
+          id: recordId,
+          importJobId: id,
+          ...(userId ? { importJob: { createdById: userId } } : {}),
+        },
         include: { importJob: true },
       });
 
@@ -691,7 +721,7 @@ export class ImportController {
 
       let result: any;
       try {
-        const client = await BitrixClient.fromDbConfiguration();
+        const client = await BitrixClient.fromDbConfiguration(record.importJob.createdById || req.user?.id);
 
         if (importType === 'STOCK_RECEIPTS') {
           const stockReceiptService = new BitrixStockReceiptService(client);
@@ -701,12 +731,13 @@ export class ImportController {
             mapping,
             record.importJob.importMode,
             record.importJob.bitrixDocumentId ? Number(record.importJob.bitrixDocumentId) : undefined,
-            stores
+            stores,
+            client
           );
         } else if (importType === 'INVOICES') {
-          result = await invoiceImportService.processInvoiceRecord(rowData, mapping, record.importJob.importMode);
+          result = await invoiceImportService.processInvoiceRecord(rowData, mapping, record.importJob.importMode, client);
         } else {
-          result = await importService.processRecord(rowData, mapping, record.importJob.importMode);
+          result = await importService.processRecord(rowData, mapping, record.importJob.importMode, client);
         }
       } catch (err: any) {
         result = {

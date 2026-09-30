@@ -1,9 +1,24 @@
 import { Request } from 'express';
 
+export interface LicenseInfo {
+  licenseKey: string;
+  status: string;
+  planName: string;
+  productName: string;
+  productId?: string;
+  startDate?: string;
+  endDate?: string;
+  daysRemaining?: number;
+  isExpired: boolean;
+  expiryMessage?: string;
+  features?: Record<string, any>;
+}
+
 export interface AuthUser {
   id: string;
   email: string;
   role: string;
+  license?: LicenseInfo;
 }
 
 export interface AuthenticatedRequest extends Request {

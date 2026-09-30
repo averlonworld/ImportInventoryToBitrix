@@ -4,15 +4,15 @@ services:
     container_name: bitrix_inventory_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: bitrix_inventory
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d bitrix_inventory"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -44,20 +44,24 @@ services:
     ports:
       - "5000:5000"
     environment:
-      NODE_ENV: production
-      PORT: 5000
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/bitrix_inventory
-      REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET:-change-me-please-in-production}
-      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@system.com}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-Admin@123456}
-      BITRIX_ENCRYPTION_KEY: ${BITRIX_ENCRYPTION_KEY:-default-encryption-key-change}
-      MAX_FILE_SIZE_MB: 10
-      BITRIX_CONCURRENCY: 5
-      BITRIX_MAX_RETRIES: 3
-      BITRIX_REQUEST_TIMEOUT: 30000
-      BATCH_SIZE: 50
-      COOKIE_SECURE: "false"
+      NODE_ENV: ${NODE_ENV}
+      PORT: ${PORT}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      REDIS_URL: redis://${REDIS_HOST}:${REDIS_PORT}
+      JWT_SECRET: ${JWT_SECRET}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      BITRIX_ENCRYPTION_KEY: ${BITRIX_ENCRYPTION_KEY}
+      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB}
+      BITRIX_CONCURRENCY: ${BITRIX_CONCURRENCY}
+      BITRIX_MAX_RETRIES: ${BITRIX_MAX_RETRIES}
+      BITRIX_REQUEST_TIMEOUT: ${BITRIX_REQUEST_TIMEOUT}
+      BATCH_SIZE: ${BATCH_SIZE}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN}
+      COOKIE_SECURE: ${COOKIE_SECURE}
+      UPLOAD_DIR: ${UPLOAD_DIR}
+      LICENTIC_PRODUCT_ID: ${LICENTIC_PRODUCT_ID}
+      LICENTIC_API_BASE: ${LICENTIC_API_BASE}
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,12 +79,14 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL}
     container_name: bitrix_inventory_frontend
     restart: unless-stopped
     ports:
       - "3000:80"
     environment:
-      VITE_API_URL: http://localhost:5000
+      VITE_API_URL: ${VITE_API_URL}
     depends_on:
       - backend
     networks:

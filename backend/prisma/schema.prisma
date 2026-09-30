@@ -18,6 +18,7 @@ model User {
   updatedAt    DateTime @updatedAt
   imports      ImportJob[]
   mappings     ColumnMapping[]
+  bitrixConfigs BitrixConfiguration[]
 }
 
 model BitrixConfiguration {
@@ -29,6 +30,8 @@ model BitrixConfiguration {
   connectionStatus    String   @default("UNKNOWN")
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
+  createdBy           User?    @relation(fields: [createdById], references: [id])
+  createdById         String?  @db.Uuid
 }
 
 model ImportJob {

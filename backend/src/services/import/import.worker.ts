@@ -203,7 +203,7 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
 
     if (hasInventoryStock) {
       try {
-        const client = await BitrixClient.fromDbConfiguration();
+        const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
         const stockReceiptService = new BitrixStockReceiptService(client);
         storesList = await stockReceiptService.getStores();
 
@@ -315,10 +315,10 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
           });
 
           const result = hasInventoryStock
-            ? await stockReceiptImportService.processRecord(rowData, effectiveMapping, importMode, bitrixDocumentId, storesList)
+            ? await stockReceiptImportService.processRecord(rowData, effectiveMapping, importMode, bitrixDocumentId, storesList, importJob.createdById || undefined)
             : importType === 'INVOICES'
-              ? await invoiceImportService.processInvoiceRecord(rowData, effectiveMapping, importMode)
-              : await importService.processRecord(rowData, effectiveMapping, importMode);
+              ? await invoiceImportService.processInvoiceRecord(rowData, effectiveMapping, importMode, importJob.createdById || undefined)
+              : await importService.processRecord(rowData, effectiveMapping, importMode, importJob.createdById || undefined);
 
           const rec = result as any;
 
@@ -428,7 +428,7 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
     // Conduct stock receipt document in Bitrix24 if applicable
     if (bitrixDocumentId) {
       try {
-        const client = await BitrixClient.fromDbConfiguration();
+        const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
         const stockReceiptService = new BitrixStockReceiptService(client);
 
         // Calculate and set document total header before conducting
@@ -509,7 +509,7 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
 
     if (existingDocId && hasInventoryStock) {
       try {
-        const client = await BitrixClient.fromDbConfiguration();
+        const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
         await client.callMethod('crm.timeline.comment.add', {
           fields: {
             ENTITY_ID: Number(existingDocId),

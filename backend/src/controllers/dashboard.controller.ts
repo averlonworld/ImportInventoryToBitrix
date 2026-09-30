@@ -4,22 +4,33 @@ import { AuthenticatedRequest } from '../types';
 import { logger } from '../utils/logger';
 
 export class DashboardController {
-  async getStats(_req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  async getStats(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
+      const userId = req.user?.id;
+
+      // Filter by the authenticated user's ID
+      const jobWhere = userId ? { createdById: userId } : {};
+      const recordWhere = userId ? { importJob: { createdById: userId } } : {};
+
+      const bitrixWhere = userId ? { createdById: userId, isActive: true } : { isActive: true };
+
       const [totalImports, totalRecords, successfulRecords, failedRecords, skippedRecords, bitrixConfig, recentImports] =
         await Promise.all([
-          prisma.importJob.count(),
-          prisma.importRecord.count(),
-          prisma.importRecord.count({ where: { status: 'SUCCESS' } }),
-          prisma.importRecord.count({ where: { status: 'FAILED' } }),
-          prisma.importRecord.count({ where: { status: 'SKIPPED' } }),
-          prisma.bitrixConfiguration.findFirst({ where: { isActive: true } }),
+          prisma.importJob.count({ where: jobWhere }),
+          prisma.importRecord.count({ where: recordWhere }),
+          prisma.importRecord.count({ where: { ...recordWhere, status: 'SUCCESS' } }),
+          prisma.importRecord.count({ where: { ...recordWhere, status: { in: ['FAILED', 'PARTIAL_FAILURE'] } } }),
+          prisma.importRecord.count({ where: { ...recordWhere, status: 'SKIPPED' } }),
+          prisma.bitrixConfiguration.findFirst({ where: bitrixWhere, orderBy: { updatedAt: 'desc' } }),
           prisma.importJob.findMany({
+            where: jobWhere,
             orderBy: { createdAt: 'desc' },
             take: 10,
             include: { createdBy: { select: { email: true } } },
           }),
         ]);
+
+      const isConfigured = !!bitrixConfig && !!bitrixConfig.webhookUrlEncrypted;
 
       res.json({
         success: true,
@@ -30,9 +41,9 @@ export class DashboardController {
           failedRecords,
           skippedRecords,
           bitrixConnection: {
-            status: bitrixConfig?.connectionStatus || 'UNKNOWN',
-            configured: !!bitrixConfig,
-            lastTestedAt: bitrixConfig?.lastTestedAt || null,
+            status: isConfigured ? (bitrixConfig.connectionStatus || 'UNKNOWN') : 'UNKNOWN',
+            configured: isConfigured,
+            lastTestedAt: isConfigured ? (bitrixConfig.lastTestedAt || null) : null,
           },
           recentImports,
         },
