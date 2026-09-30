@@ -55,7 +55,7 @@ export default function Login() {
                 type="email"
                 {...register('email')}
                 className="input-field"
-                placeholder="admin@system.com"
+                placeholder="name@example.com"
                 autoComplete="email"
               />
               {errors.email && <p className="mt-1 text-sm text-red-600">{errors.email.message}</p>}
@@ -67,7 +67,7 @@ export default function Login() {
                 type="password"
                 {...register('password')}
                 className="input-field"
-                placeholder="Enter password"
+                placeholder="••••••••"
                 autoComplete="current-password"
               />
               {errors.password && <p className="mt-1 text-sm text-red-600">{errors.password.message}</p>}
@@ -81,14 +81,6 @@ export default function Login() {
               {submitting ? 'Logging in...' : 'Login'}
             </button>
           </form>
-
-          <div className="mt-6 p-3 bg-blue-50 rounded-md">
-            <p className="text-xs text-blue-800">
-              <strong>Default admin credentials:</strong><br />
-              Email: admin@system.com<br />
-              Password: Admin@123456
-            </p>
-          </div>
         </div>
       </div>
     </div>
