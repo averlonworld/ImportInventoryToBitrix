@@ -59,7 +59,6 @@ services:
       BATCH_SIZE: ${BATCH_SIZE}
       COOKIE_DOMAIN: ${COOKIE_DOMAIN}
       COOKIE_SECURE: ${COOKIE_SECURE}
-      UPLOAD_DIR: ${UPLOAD_DIR}
       LICENTIC_PRODUCT_ID: ${LICENTIC_PRODUCT_ID}
       LICENTIC_API_BASE: ${LICENTIC_API_BASE}
     depends_on:
@@ -67,8 +66,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - backend_uploads:/app/uploads
     networks:
       - bitrix_network
     command: >
@@ -95,7 +92,6 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  backend_uploads:
 
 networks:
   bitrix_network:

@@ -14,6 +14,7 @@ import { stockReceiptImportService } from '../services/import/stockReceiptImport
 import { importService } from '../services/import/import.service';
 import { invoiceImportService } from '../services/import/invoiceImport.service';
 import { extractRowData, classifyError } from '../services/import/import.worker';
+import os from 'os';
 import path from 'path';
 import fs from 'fs';
 
@@ -49,10 +50,10 @@ export class ImportController {
         throw new AppError('filePath and fileName are required', 400);
       }
 
-      // Security: ensure the file path is within uploads dir
-      const uploadDir = path.resolve(__dirname, '../../uploads');
+      // Security: ensure the file path is within temporary directory
+      const tempDir = os.tmpdir();
       const resolvedPath = path.resolve(filePath);
-      if (!resolvedPath.startsWith(uploadDir)) {
+      if (!resolvedPath.startsWith(tempDir)) {
         throw new AppError('Invalid file path', 400);
       }
 
@@ -102,9 +103,9 @@ export class ImportController {
         throw new AppError('filePath and fileName are required', 400);
       }
 
-      const uploadDir = path.resolve(__dirname, '../../uploads');
+      const tempDir = os.tmpdir();
       const resolvedPath = path.resolve(filePath);
-      if (!resolvedPath.startsWith(uploadDir)) {
+      if (!resolvedPath.startsWith(tempDir)) {
         throw new AppError('Invalid file path', 400);
       }
 

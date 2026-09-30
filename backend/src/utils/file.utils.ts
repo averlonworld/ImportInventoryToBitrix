@@ -1,3 +1,4 @@
+import os from 'os';
 import path from 'path';
 import fs from 'fs/promises';
 import { v4 as uuidv4 } from 'uuid';
@@ -6,7 +7,7 @@ import { env } from '../config/env';
 const ALLOWED_EXTENSIONS = ['.xlsx', '.xls', '.csv'];
 
 export function getUploadDir(): string {
-  return env.UPLOAD_DIR;
+  return os.tmpdir();
 }
 
 export async function ensureUploadDir(): Promise<void> {

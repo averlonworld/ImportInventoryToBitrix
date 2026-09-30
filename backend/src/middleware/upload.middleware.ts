@@ -1,4 +1,5 @@
 import multer from 'multer';
+import os from 'os';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { env } from '../config/env';
@@ -15,11 +16,11 @@ const ALLOWED_EXTENSIONS = ['.xlsx', '.xls', '.csv'];
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => {
-    cb(null, env.UPLOAD_DIR);
+    cb(null, os.tmpdir());
   },
   filename: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `${uuidv4()}${ext}`);
+    cb(null, `import_${uuidv4()}${ext}`);
   },
 });
 

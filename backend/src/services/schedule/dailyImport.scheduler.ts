@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { prisma } from '../../config/database';
 import { excelService } from '../excel/excel.service';
 import { excelValidator } from '../excel/excel.validator';
@@ -20,7 +21,7 @@ export interface DailySchedulerConfig {
 }
 
 // In-memory scheduler config with default persistence
-const FEED_DIR = path.resolve(env.UPLOAD_DIR, 'daily_feed');
+const FEED_DIR = path.resolve(os.tmpdir(), 'daily_feed');
 const PROCESSED_DIR = path.resolve(FEED_DIR, 'processed');
 
 let schedulerConfig: DailySchedulerConfig = {
@@ -123,9 +124,9 @@ export class DailyImportScheduler {
     });
 
     try {
-      // 1. Copy file to standard uploads directory so worker can process and clean up
+      // 1. Copy file to temporary directory so worker can process and clean up
       const destFileName = `daily_${Date.now()}_${fileName}`;
-      const destFilePath = path.join(env.UPLOAD_DIR, destFileName);
+      const destFilePath = path.join(os.tmpdir(), destFileName);
       fs.copyFileSync(sourceFilePath, destFilePath);
 
       // 2. Parse file

@@ -77,8 +77,6 @@ app.use('/api', apiLimiter);
 // Ensure upload directory exists
 ensureUploadDir().catch(err => console.error('Failed to create upload dir:', err));
 
-// Static uploads
-app.use('/uploads', express.static(path.resolve(__dirname, '../uploads')));
 
 // Health check
 app.get('/health', async (_req, res) => {

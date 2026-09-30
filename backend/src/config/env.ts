@@ -41,7 +41,6 @@ export const env = {
   BATCH_SIZE: parseInt(getRequiredEnv('BATCH_SIZE'), 10),
   COOKIE_DOMAIN: getRequiredEnv('COOKIE_DOMAIN', true),
   COOKIE_SECURE: getRequiredEnv('COOKIE_SECURE') === 'true',
-  UPLOAD_DIR: path.resolve(getRequiredEnv('UPLOAD_DIR')),
   LICENTIC_API_BASE: getRequiredEnv('LICENTIC_API_BASE'),
   LICENTIC_PRODUCT_ID: getRequiredEnv('LICENTIC_PRODUCT_ID'),
 };

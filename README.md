@@ -474,7 +474,6 @@ Copy `.env.example` to `.env` in the root folder for Docker Compose or in `backe
 | `ADMIN_EMAIL` | `admin@system.com` | Default email for seeded administrator |
 | `ADMIN_PASSWORD` | `Admin@123456` | Default password for seeded administrator |
 | `BITRIX_ENCRYPTION_KEY` | *(Required 32-char)* | Secret key used for AES-256-GCM webhook encryption |
-| `UPLOAD_DIR` | `./uploads` | Staging upload directory |
 | `MAX_FILE_SIZE_MB` | `10` | Maximum allowed file upload size in MB |
 | `BITRIX_CONCURRENCY` | `5` | Maximum parallel calls to Bitrix per worker batch |
 | `BITRIX_MAX_RETRIES` | `3` | Max retries when encountering Bitrix rate limits |
