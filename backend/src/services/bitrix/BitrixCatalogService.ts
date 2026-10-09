@@ -260,12 +260,12 @@ async function resolveCatalogContext(client: BitrixClient): Promise<CatalogConte
             if (!itemCodePropertyIds.includes(id)) itemCodePropertyIds.push(id);
           }
 
-          // Stock quantity properties (e.g. 2594 "Stock Quantity", 834 "Available stock")
-          if (nameLower.includes('stock quantity') || nameLower.includes('available stock') || codeUpper.includes('AVAILABLE_STOCK')) {
+          // Stock quantity properties (e.g. 115 "Stock Quantity", "Available stock")
+          if (nameLower.includes('stock quantity') || nameLower.includes('available stock') || codeUpper.includes('STOCK_QUANTITY') || codeUpper.includes('AVAILABLE_STOCK')) {
             if (!stockQtyPropertyIds.includes(id)) stockQtyPropertyIds.push(id);
           }
 
-          // Cost properties (e.g. 2578 "Cost Per Item", 2628 "Cost")
+          // Cost properties (e.g. 111 "Cost", "Cost Per Item")
           if (nameLower.includes('cost per item') || codeUpper.includes('COST_PER_ITEM') || nameLower === 'cost' || codeUpper === 'COST_PROP') {
             if (!costPropertyIds.includes(id)) costPropertyIds.push(id);
           }
@@ -275,7 +275,7 @@ async function resolveCatalogContext(client: BitrixClient): Promise<CatalogConte
             if (!dealerPricePropertyIds.includes(id)) dealerPricePropertyIds.push(id);
           }
 
-          // End user price properties (e.g. 2630 "End User Price")
+          // End user price properties (e.g. 109 "End User Price")
           if (nameLower.includes('end user price') || codeUpper.includes('END_USER_PRICE')) {
             if (!endUserPricePropertyIds.includes(id)) endUserPricePropertyIds.push(id);
           }
@@ -637,6 +637,18 @@ export class BitrixProductService {
     const firstProbe = state === 'unknown';
 
     try {
+      // Also update custom property if configured so grid columns reflect stock quantity
+      if (this.context.stockQtyPropertyIds && this.context.stockQtyPropertyIds.length > 0) {
+        const crmF: any = {};
+        const catF: any = {};
+        this.context.stockQtyPropertyIds.forEach(propId => {
+          crmF[`PROPERTY_${propId}`] = { value: String(quantity) };
+          catF[`property${propId}`] = { value: String(quantity) };
+        });
+        await this.client.callMethod('catalog.product.update', { id: productId, fields: catF }).catch(() => {});
+        await this.client.callMethod('crm.product.update', { id: productId, fields: crmF }).catch(() => {});
+      }
+
       await this.client.callMethod('catalog.product.update', {
         id: productId,
         fields: { quantity },
@@ -814,17 +826,17 @@ export class BitrixProductService {
       catAddFields[`property${propId}`] = { value: codeVal };
     });
     if (input.qtyInStock !== undefined && input.qtyInStock !== null && !isNaN(Number(input.qtyInStock))) {
+      catAddFields.quantity = Number(input.qtyInStock);
       this.context.stockQtyPropertyIds?.forEach(propId => {
         catAddFields[`property${propId}`] = { value: String(input.qtyInStock) };
       });
-      catAddFields.quantity = Number(input.qtyInStock);
     }
     if (input.cost !== undefined && input.cost !== null && !isNaN(Number(input.cost))) {
+      catAddFields.purchasingPrice = Number(input.cost);
+      catAddFields.purchasingCurrency = this.context.currency;
       this.context.costPropertyIds?.forEach(propId => {
         catAddFields[`property${propId}`] = { value: String(input.cost) };
       });
-      catAddFields.purchasingPrice = Number(input.cost);
-      catAddFields.purchasingCurrency = this.context.currency;
     }
     if (input.qtyOnOrder !== undefined && input.qtyOnOrder !== null && !isNaN(Number(input.qtyOnOrder))) {
       this.context.qtyOnOrderPropertyIds?.forEach(propId => {
@@ -937,6 +949,11 @@ export class BitrixProductService {
           syncCrmFields[`PROPERTY_${propId}`] = { value: String(input.cost) };
         });
       }
+      if (input.qtyInStock !== undefined && input.qtyInStock !== null && !isNaN(Number(input.qtyInStock))) {
+        this.context.stockQtyPropertyIds?.forEach(propId => {
+          syncCrmFields[`PROPERTY_${propId}`] = { value: String(input.qtyInStock) };
+        });
+      }
       if (input.dealerPrice !== undefined && input.dealerPrice !== null && !isNaN(Number(input.dealerPrice))) {
         this.context.dealerPricePropertyIds?.forEach(propId => {
           syncCrmFields[`PROPERTY_${propId}`] = { value: String(input.dealerPrice) };
@@ -998,17 +1015,18 @@ export class BitrixProductService {
     if (input.description) {
       crmFields.DESCRIPTION = input.description.trim();
     }
+    // End User Price is native to product (PRICE) and BASE catalog price type - also written to custom property for grid view
     if (input.endUserPrice !== undefined || input.dealerPrice !== undefined) {
       crmFields.PRICE = input.endUserPrice ?? input.dealerPrice ?? 0;
-    }
-    if (input.qtyInStock !== undefined && input.qtyInStock !== null && !isNaN(Number(input.qtyInStock))) {
-      this.context.stockQtyPropertyIds?.forEach(propId => {
-        crmFields[`PROPERTY_${propId}`] = { value: String(input.qtyInStock) };
-      });
     }
     if (input.cost !== undefined && input.cost !== null && !isNaN(Number(input.cost))) {
       this.context.costPropertyIds?.forEach(propId => {
         crmFields[`PROPERTY_${propId}`] = { value: String(input.cost) };
+      });
+    }
+    if (input.qtyInStock !== undefined && input.qtyInStock !== null && !isNaN(Number(input.qtyInStock))) {
+      this.context.stockQtyPropertyIds?.forEach(propId => {
+        crmFields[`PROPERTY_${propId}`] = { value: String(input.qtyInStock) };
       });
     }
     if (input.qtyOnOrder !== undefined && input.qtyOnOrder !== null && !isNaN(Number(input.qtyOnOrder))) {
@@ -1066,6 +1084,7 @@ export class BitrixProductService {
       if (this.context.barcodePropertyId && input.barcode) {
         catFields[`property${this.context.barcodePropertyId}`] = { value: input.barcode.trim() };
       }
+      // Cost is native to Bitrix Inventory Management (purchasingPrice) and custom property
       if (input.cost !== undefined && input.cost !== null && !isNaN(Number(input.cost))) {
         catFields.purchasingPrice = Number(input.cost);
         catFields.purchasingCurrency = this.context.currency;
@@ -1073,6 +1092,7 @@ export class BitrixProductService {
           catFields[`property${propId}`] = { value: String(input.cost) };
         });
       }
+      // Stock Quantity is native to Bitrix Inventory Management (quantity) and custom property
       if (input.qtyInStock !== undefined && input.qtyInStock !== null && !isNaN(Number(input.qtyInStock))) {
         catFields.quantity = Number(input.qtyInStock);
         this.context.stockQtyPropertyIds?.forEach(propId => {
@@ -1089,6 +1109,7 @@ export class BitrixProductService {
           catFields[`property${propId}`] = { value: String(input.dealerPrice) };
         });
       }
+      // End User Price custom property for grid display
       if (input.endUserPrice !== undefined && input.endUserPrice !== null && !isNaN(Number(input.endUserPrice))) {
         this.context.endUserPricePropertyIds?.forEach(propId => {
           catFields[`property${propId}`] = { value: String(input.endUserPrice) };
