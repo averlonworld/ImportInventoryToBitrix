@@ -3,7 +3,7 @@ import fs from 'fs';
 import { prisma } from '../../config/database';
 import { importService } from './import.service';
 import { invoiceImportService } from './invoiceImport.service';
-import { stockReceiptImportService } from './stockReceiptImport.service';
+import { stockReceiptImportService, StockAdjustmentContext } from './stockReceiptImport.service';
 import { BitrixClient } from '../bitrix/BitrixClient';
 import { BitrixStockReceiptService, BitrixStore } from '../bitrix/BitrixStockReceiptService';
 import { createImportWorker, ImportJobData, ImportType } from '../../queues/import.queue';
@@ -191,81 +191,73 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
       recordCount: await prisma.importRecord.count({ where: { importJobId, status: 'PENDING' } }),
     });
 
-    let bitrixDocumentId: number | undefined;
-    let existingDocId: number | undefined;
+    let receiptDocId: number | undefined;
+    let deductionDocId: number | undefined;
+    let receiptElemCount = 0;
+    let deductionElemCount = 0;
+    const plannedStockMap = new Map<string, number>();
     let storesList: BitrixStore[] = [];
     const customTitle = (effectiveMapping && (effectiveMapping as any).documentTitle && String((effectiveMapping as any).documentTitle).trim()) ||
                         (importJob.mappingJson && (importJob.mappingJson as any).documentTitle && String((importJob.mappingJson as any).documentTitle).trim()) ||
                         undefined;
     const cleanFileName = importJob.fileName.replace(/\.[^/.]+$/, '').trim();
     const docTitle = customTitle || cleanFileName;
-    const hasInventoryStock = importType === 'STOCK_RECEIPTS' || !!effectiveMapping.quantityField || !!effectiveMapping.quantityArrivedField;
+    const hasInventoryStock = importType === 'STOCK_RECEIPTS' || !!effectiveMapping.quantityField || !!effectiveMapping.quantityArrivedField || !!effectiveMapping.qtyInStockField;
 
     if (hasInventoryStock) {
       try {
         const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
         const stockReceiptService = new BitrixStockReceiptService(client);
         storesList = await stockReceiptService.getStores();
-
-        if (importJob.bitrixDocumentId) {
-          const rawDocId = Number(String(importJob.bitrixDocumentId).replace(/\D+/g, ''));
-          if (rawDocId && !isNaN(rawDocId)) {
-            try {
-              const check = await client.callMethod('catalog.document.list', { filter: { id: rawDocId } });
-              const d = (check?.documents || [])[0];
-              if (d && d.status === 'Y') {
-                logger.info(`Job ${importJobId} references conducted document #${rawDocId}. Skipping new document creation; updating Product Catalog directly.`);
-                existingDocId = rawDocId;
-                bitrixDocumentId = undefined;
-              } else if (d) {
-                bitrixDocumentId = rawDocId;
-              }
-            } catch {
-              bitrixDocumentId = undefined;
-            }
-          }
-        } else {
-          // Option A: Check if a document with this title already exists in Bitrix24
-          try {
-            const checkTitle = await client.callMethod('catalog.document.list', {
-              filter: { title: docTitle },
-              order: { id: 'desc' },
-            });
-            const found = (checkTitle?.documents || []).find((d: any) =>
-              (d.title || '').trim().toLowerCase() === docTitle.trim().toLowerCase()
-            );
-            if (found && found.id) {
-              existingDocId = Number(found.id);
-            }
-          } catch (chkErr: any) {
-            logger.warn({ err: chkErr?.message }, `Failed to query existing document by title: ${docTitle}`);
-          }
-
-          if (existingDocId) {
-            logger.info(`Option A: Document with title "${docTitle}" already exists in Bitrix24 (ID #${existingDocId}). Skipping creation in Inventory Management; updating Product Catalog and store stock directly.`);
-            debugLog.info('WORKER', `Document "${docTitle}" already exists (ID #${existingDocId}). Skipping document creation in Inventory Management; updating Product Catalog directly.`);
-            bitrixDocumentId = undefined;
-            await prisma.importJob.update({
-              where: { id: importJobId },
-              data: { bitrixDocumentId: `${existingDocId} (Existing - Skipped)` },
-            });
-          } else {
-            const doc = await stockReceiptService.createStockReceiptDocument(
-              docTitle,
-              `Imported via Bitrix24 Middleware (Job: ${importJobId})`
-            );
-            bitrixDocumentId = doc.id;
-            await prisma.importJob.update({
-              where: { id: importJobId },
-              data: { bitrixDocumentId: String(bitrixDocumentId) },
-            });
-            logger.info(`Created Bitrix stock receipt document ID ${bitrixDocumentId} with title: "${docTitle}" for job ${importJobId}`);
-          }
-        }
-      } catch (docErr: any) {
-        logger.warn({ err: docErr }, 'Failed to initialize Bitrix stock receipt document; continuing with catalog sync');
+      } catch (err: any) {
+        logger.warn({ err: err?.message }, 'Failed to fetch stores list; defaulting to primary store');
       }
     }
+
+    const getOrCreateReceiptDoc = async (): Promise<number> => {
+      if (!receiptDocId) {
+        const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
+        const stockReceiptService = new BitrixStockReceiptService(client);
+        const doc = await stockReceiptService.createStockReceiptDocument(
+          `${docTitle} (Adjustment +)`,
+          `Stock replacement upward adjustment for import job ${importJobId}`,
+          undefined,
+          undefined,
+          'S'
+        );
+        receiptDocId = doc.id;
+        logger.info(`Created Bitrix stock receipt document ID ${receiptDocId} for job ${importJobId}`);
+      }
+      return receiptDocId;
+    };
+
+    const getOrCreateDeductionDoc = async (): Promise<number> => {
+      if (!deductionDocId) {
+        const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
+        const stockReceiptService = new BitrixStockReceiptService(client);
+        const doc = await stockReceiptService.createStockReceiptDocument(
+          `${docTitle} (Adjustment -)`,
+          `Stock replacement downward adjustment (write-off) for import job ${importJobId}`,
+          undefined,
+          undefined,
+          'D'
+        );
+        deductionDocId = doc.id;
+        logger.info(`Created Bitrix stock deduction document ID ${deductionDocId} for job ${importJobId}`);
+      }
+      return deductionDocId;
+    };
+
+    const stockAdjustmentContext: StockAdjustmentContext = {
+      docTitle,
+      plannedStockMap,
+      getOrCreateReceiptDoc,
+      getOrCreateDeductionDoc,
+      onElementAdded: (docType) => {
+        if (docType === 'S') receiptElemCount++;
+        else if (docType === 'D') deductionElemCount++;
+      },
+    };
 
     // Load pending records, draining the queue until none remain.
     // NOTE: skip is always 0 because processed records leave the PENDING set;
@@ -315,7 +307,7 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
           });
 
           const result = hasInventoryStock
-            ? await stockReceiptImportService.processRecord(rowData, effectiveMapping, importMode, bitrixDocumentId, storesList, importJob.createdById || undefined)
+            ? await stockReceiptImportService.processRecord(rowData, effectiveMapping, importMode, stockAdjustmentContext, storesList, importJob.createdById || undefined)
             : importType === 'INVOICES'
               ? await invoiceImportService.processInvoiceRecord(rowData, effectiveMapping, importMode, importJob.createdById || undefined)
               : await importService.processRecord(rowData, effectiveMapping, importMode, importJob.createdById || undefined);
@@ -425,100 +417,74 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
       });
     }
 
-    // Conduct stock receipt document in Bitrix24 if applicable
-    if (bitrixDocumentId) {
+    // Conduct stock adjustment documents in Bitrix24 if applicable
+    let conductionError: string | undefined;
+    if (hasInventoryStock) {
       try {
         const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
         const stockReceiptService = new BitrixStockReceiptService(client);
+        const conductedDocs: number[] = [];
 
-        // Calculate and set document total header before conducting
-        try {
-          const elemRes = await client.callMethod('catalog.document.element.list', {
-            filter: { docId: Number(bitrixDocumentId) }
-          });
-          const elems = (elemRes && (elemRes.documentElements || elemRes.result || elemRes)) || [];
-          if (Array.isArray(elems) && elems.length > 0) {
-            const docTotal = elems.reduce((acc: number, el: any) => {
-              const amt = Number(el.amount) || 0;
-              const price = Number(el.purchasingPrice) || 0;
-              return acc + (amt * price);
-            }, 0);
-
-            // Build an itemized commentary showing all 8 fields for the document
-            const records = await prisma.importRecord.findMany({
-              where: { importJobId, status: { in: ['SUCCESS', 'PARTIAL_FAILURE'] } },
-              orderBy: { rowNumber: 'asc' },
-              take: 50,
-            });
-
-            const summaryLines = records.map((r: any, idx: number) => {
-              const d = r.rawData || {};
-              const code = r.sku || d.code || d.CODE || '';
-              const part = d.partNumber || d['PART NUMBER'] || '';
-              const stock = d.qtyInStock ?? d['QTY IN STOCK'] ?? '';
-              const order = d.qtyOnOrder ?? d['QTY ON ORDER'] ?? 0;
-              const cost = d.cost ?? d.COST ?? '';
-              const dealer = d.dealerPrice ?? d['DEALER PRICE'] ?? '';
-              const endUser = d.endUserPrice ?? d['END USER PRICE'] ?? '';
-              return `${idx + 1}. [${code}] ${part} | Stock: ${stock} | OnOrder: ${order} | Cost: ${cost} | Dealer: ${dealer} | EndUser: ${endUser}`;
-            });
-
-            const docFields: any = {};
-            if (docTotal > 0) docFields.total = docTotal;
-            if (summaryLines.length > 0) {
-              docFields.commentary = `Stock Receipt: ${docTitle} (${records.length} items)\nValuation: ${docTotal}\n\n` + summaryLines.join('\n');
-            }
-
-            if (Object.keys(docFields).length > 0) {
-              await client.callMethod('catalog.document.update', {
-                id: Number(bitrixDocumentId),
-                fields: docFields,
+        // Helper to set total headers and conduct document
+        const finalizeDoc = async (docId: number, count: number, typeLabel: string) => {
+          if (count > 0) {
+            try {
+              const elemRes = await client.callMethod('catalog.document.element.list', {
+                filter: { docId: Number(docId) }
               });
+              const elems = (elemRes && (elemRes.documentElements || elemRes.result || elemRes)) || [];
+              if (Array.isArray(elems) && elems.length > 0) {
+                const docTotal = elems.reduce((acc: number, el: any) => {
+                  const amt = Number(el.amount) || 0;
+                  const price = Number(el.purchasingPrice) || 0;
+                  return acc + (amt * price);
+                }, 0);
 
-              if (docFields.commentary) {
-                try {
-                  await client.callMethod('crm.timeline.comment.add', {
-                    fields: {
-                      ENTITY_ID: Number(bitrixDocumentId),
-                      ENTITY_TYPE: 'store_document',
-                      COMMENT: docFields.commentary,
-                    },
-                  });
-                } catch (timelineErr: any) {
-                  logger.warn({ err: timelineErr }, 'Failed to add timeline comment to store document');
-                }
+                const docFields: any = {};
+                if (docTotal > 0) docFields.total = docTotal;
+                docFields.commentary = `${typeLabel}: ${docTitle} (${elems.length} items adjusted)`;
+                await client.callMethod('catalog.document.update', {
+                  id: Number(docId),
+                  fields: docFields,
+                });
               }
+            } catch (totErr: any) {
+              logger.warn({ err: totErr }, `Could not set document header total for doc ${docId}`);
             }
+
+            const conductRes = await stockReceiptService.conductDocument(docId);
+            if (conductRes.success) {
+              conductedDocs.push(docId);
+              logger.info(`Conducted Bitrix inventory document (${typeLabel}) ID ${docId}`);
+              debugLog.info('WORKER', `Conducted Bitrix inventory document (${typeLabel}) ID ${docId}`);
+            } else {
+              const errStr = `Could not conduct Bitrix inventory document ID ${docId}: ${conductRes.error}`;
+              logger.error(errStr);
+              debugLog.error('WORKER', errStr);
+              conductionError = conductRes.error || errStr;
+            }
+          } else {
+            // Delete unused draft document
+            await stockReceiptService.deleteDocument(docId);
           }
-        } catch (totErr: any) {
-          logger.warn({ err: totErr }, 'Could not set document header total');
+        };
+
+        if (receiptDocId) {
+          await finalizeDoc(receiptDocId, receiptElemCount, 'Stock Replacement (+) Receipt');
+        }
+        if (deductionDocId) {
+          await finalizeDoc(deductionDocId, deductionElemCount, 'Stock Replacement (-) Deduction');
         }
 
-        const conductRes = await stockReceiptService.conductDocument(bitrixDocumentId);
-        if (conductRes.success) {
-          logger.info(`Conducted Bitrix stock receipt document ID ${bitrixDocumentId}`);
-          debugLog.info('WORKER', `Conducted Bitrix stock receipt document ID ${bitrixDocumentId}`);
-        } else {
-          logger.warn(`Could not conduct Bitrix stock receipt document ID ${bitrixDocumentId}: ${conductRes.error}`);
-          debugLog.warn('WORKER', `Could not conduct Bitrix stock receipt document ${bitrixDocumentId}: ${conductRes.error}`);
+        if (conductedDocs.length > 0) {
+          await prisma.importJob.update({
+            where: { id: importJobId },
+            data: { bitrixDocumentId: conductedDocs.join(', ') },
+          });
         }
       } catch (err: any) {
-        logger.warn({ err }, 'Error during stock receipt document conducting');
-      }
-    }
-
-    if (existingDocId && hasInventoryStock) {
-      try {
-        const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
-        await client.callMethod('crm.timeline.comment.add', {
-          fields: {
-            ENTITY_ID: Number(existingDocId),
-            ENTITY_TYPE: 'store_document',
-            COMMENT: `📦 Stock & Prices re-synchronized from import "${docTitle}" on ${new Date().toLocaleString()}.\nProduct Catalog items and store quantities updated directly.`,
-          },
-        });
-      } catch (tErr: any) {
-        logger.warn({ err: tErr?.message }, 'Failed to add update comment to existing store document');
+        logger.error({ err }, 'Error during stock adjustment document conduction');
+        conductionError = err.message || 'Stock document conduction error';
       }
     }
 
@@ -533,7 +499,7 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
     ]);
 
     let finalStatus = 'COMPLETED';
-    if (failedCount > 0 || partialCount > 0) {
+    if (failedCount > 0 || partialCount > 0 || conductionError) {
       finalStatus = 'COMPLETED_WITH_ERRORS';
     }
 

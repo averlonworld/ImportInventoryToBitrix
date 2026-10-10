@@ -102,10 +102,11 @@ export class BitrixStockReceiptService {
     title: string,
     commentary?: string,
     currency?: string,
-    responsibleId?: number
-  ): Promise<{ id: number; title: string }> {
+    responsibleId?: number,
+    docType: 'S' | 'D' = 'S'
+  ): Promise<{ id: number; title: string; docType: 'S' | 'D' }> {
     try {
-      debugLog.info('BITRIX', `Creating Bitrix inventory stock receipt document: ${title}`);
+      debugLog.info('BITRIX', `Creating Bitrix inventory document (${docType}): ${title}`);
 
       // Resolve responsible user ID from current session if not provided
       let resolvedResponsibleId = responsibleId;
@@ -138,10 +139,10 @@ export class BitrixStockReceiptService {
       if (!resolvedCurrency) resolvedCurrency = 'AED';
 
       const now = new Date();
-      const docNum = `DOC-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${Date.now().toString().slice(-4)}`;
+      const docNum = `DOC-${docType}-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${Date.now().toString().slice(-4)}`;
 
       const fields: any = {
-        docType: 'S', // 'S' = Stock Adjustment / Initial Receipt (standard in Bitrix24 inventory)
+        docType, // 'S' = Stock Receipt / Adjustment, 'D' = Stock Deduction / Write-off
         title: title.slice(0, 255),
         currency: resolvedCurrency,
         responsibleId: resolvedResponsibleId,
@@ -156,15 +157,43 @@ export class BitrixStockReceiptService {
       const id = typeof doc === 'number' ? doc : doc?.id || doc?.ID;
 
       if (!id) {
-        throw new Error('Bitrix did not return a document ID for stock receipt');
+        throw new Error('Bitrix did not return a document ID for inventory document');
       }
 
-      debugLog.info('BITRIX', `Bitrix stock receipt document created with ID: ${id}`);
-      return { id: Number(id), title };
+      debugLog.info('BITRIX', `Bitrix inventory document (${docType}) created with ID: ${id}`);
+      return { id: Number(id), title, docType };
     } catch (error: any) {
-      logger.error({ err: error }, 'Failed to create Bitrix stock receipt document');
-      debugLog.error('BITRIX', `Failed to create stock receipt document: ${error.message}`);
+      logger.error({ err: error }, `Failed to create Bitrix inventory document (${docType})`);
+      debugLog.error('BITRIX', `Failed to create inventory document (${docType}): ${error.message}`);
       throw error;
+    }
+  }
+
+  async getCurrentStoreStock(productId: number, storeId?: number): Promise<number> {
+    try {
+      const targetStoreId = (storeId !== undefined && storeId !== null && Number(storeId) > 0) ? Number(storeId) : 1;
+      const listRes = await this.client.callMethod('catalog.storeproduct.list', {
+        filter: { productId: Number(productId), storeId: Number(targetStoreId) },
+      });
+      const items = (listRes && (listRes.storeProducts || listRes.result || listRes)) || [];
+      const sp = Array.isArray(items) ? items[0] : null;
+      if (sp && sp.amount !== undefined && sp.amount !== null && !isNaN(Number(sp.amount))) {
+        return Number(sp.amount);
+      }
+      return 0;
+    } catch (err: any) {
+      logger.warn({ err: err?.message, productId, storeId }, 'Failed to fetch current store stock; defaulting to 0');
+      return 0;
+    }
+  }
+
+  async deleteDocument(docId: number): Promise<boolean> {
+    try {
+      await this.client.callMethod('catalog.document.delete', { id: Number(docId) });
+      return true;
+    } catch (err: any) {
+      logger.warn({ err: err?.message, docId }, 'Failed to delete draft inventory document');
+      return false;
     }
   }
 
@@ -173,7 +202,8 @@ export class BitrixStockReceiptService {
     productId: number,
     amount: number,
     purchasingPrice?: number,
-    storeTo?: number
+    storeTo?: number,
+    storeFrom?: number
   ): Promise<boolean> {
     const numAmount = Number(amount);
     if (isNaN(numAmount) || numAmount <= 0) {
@@ -193,24 +223,27 @@ export class BitrixStockReceiptService {
         fields.purchasingPrice = Number(purchasingPrice);
       }
 
-      let targetStore = (storeTo !== undefined && storeTo !== null && Number(storeTo) > 0) ? Number(storeTo) : 0;
-      if (targetStore <= 0) {
-        try {
-          const stores = await this.getStores();
-          const main = stores.find(s => s.title.toLowerCase().includes('main') || s.id === 62) || stores[0];
-          targetStore = main ? main.id : 1;
-        } catch {
-          targetStore = 1;
+      if (storeFrom !== undefined && storeFrom !== null && Number(storeFrom) > 0) {
+        fields.storeFrom = Number(storeFrom);
+      } else {
+        let targetStore = (storeTo !== undefined && storeTo !== null && Number(storeTo) > 0) ? Number(storeTo) : 0;
+        if (targetStore <= 0) {
+          try {
+            const stores = await this.getStores();
+            const main = stores.find(s => s.title.toLowerCase().includes('main') || s.id === 62) || stores[0];
+            targetStore = main ? main.id : 1;
+          } catch {
+            targetStore = 1;
+          }
         }
+        fields.storeTo = targetStore;
       }
-
-      fields.storeTo = targetStore;
 
       await this.client.callMethod('catalog.document.element.add', { fields });
       return true;
     } catch (error: any) {
-      logger.error({ err: error, docId, productId }, 'Failed to add element to stock receipt document');
-      debugLog.warn('BITRIX', `Failed to add product ${productId} to stock receipt ${docId}: ${error.message}`);
+      logger.error({ err: error, docId, productId }, 'Failed to add element to inventory document');
+      debugLog.warn('BITRIX', `Failed to add product ${productId} to inventory document ${docId}: ${error.message}`);
       throw error;
     }
   }

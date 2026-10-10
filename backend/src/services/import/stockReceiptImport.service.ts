@@ -68,12 +68,22 @@ export interface StockReceiptResult {
   bitrixError?: string;
 }
 
+export interface StockAdjustmentContext {
+  receiptDocId?: number;
+  deductionDocId?: number;
+  docTitle?: string;
+  plannedStockMap?: Map<string, number>;
+  getOrCreateReceiptDoc?: () => Promise<number>;
+  getOrCreateDeductionDoc?: () => Promise<number>;
+  onElementAdded?: (docType: 'S' | 'D', productId: number, amount: number) => void;
+}
+
 export class StockReceiptImportService {
   async processRecord(
     rowData: StockReceiptRowData,
     mapping: StockReceiptMapping,
     importMode: string,
-    bitrixDocumentId?: number,
+    bitrixDocumentIdOrContext?: number | StockAdjustmentContext,
     storesList?: BitrixStore[],
     clientOrUserId?: BitrixClient | string
   ): Promise<StockReceiptResult> {
@@ -87,6 +97,11 @@ export class StockReceiptImportService {
     const endUserPrice = rowData.endUserPrice ?? rowData.salesPrice;
     const qtyInStock = rowData.qtyInStock ?? rowData.quantityArrived;
     const qtyOnOrder = rowData.qtyOnOrder;
+
+    // Resolve adjustment context
+    const docContext: StockAdjustmentContext = typeof bitrixDocumentIdOrContext === 'number'
+      ? { receiptDocId: bitrixDocumentIdOrContext }
+      : (bitrixDocumentIdOrContext || {});
 
     // Requirement 2: CODE is mandatory product identifier
     if (!code) {
@@ -189,37 +204,96 @@ export class StockReceiptImportService {
         return { status: 'FAILED', errorMessage: 'Failed to obtain Bitrix product ID' };
       }
 
-      // Step 2: Bitrix Inventory Stock Receipt Document Sync (QTY IN STOCK)
+      // Step 2: Bitrix Inventory Stock Replacement (Replace existing stock with uploaded quantity)
       const finalStoreId = Number(resolvedStoreId);
-      const qtyNum = qtyInStock !== undefined && qtyInStock !== null && !isNaN(Number(qtyInStock)) ? Number(qtyInStock) : 0;
+      const hasValidStockQty = qtyInStock !== undefined && qtyInStock !== null && !isNaN(Number(qtyInStock));
+      const targetQty = hasValidStockQty ? Math.max(0, Number(qtyInStock)) : undefined;
 
-      if (bitrixDocumentId && qtyNum > 0) {
+      if (targetQty !== undefined) {
         try {
-          await stockReceiptService.addDocumentElement(
-            bitrixDocumentId,
-            productId,
-            qtyNum,
-            cost !== undefined ? Number(cost) : undefined,
-            finalStoreId
-          );
-          debugLog.debug('IMPORT', `Added product ${productId} to stock receipt doc ${bitrixDocumentId} with amount ${qtyNum}`);
-        } catch (docErr: any) {
-          partialNotes.push(`Stock receipt doc line item warning: ${docErr.message}`);
+          const stockKey = `${productId}_${finalStoreId}`;
+          let previousStock: number;
+
+          if (docContext.plannedStockMap && docContext.plannedStockMap.has(stockKey)) {
+            // Already processed this product in this import file; prevent duplicate addition/deduction
+            previousStock = docContext.plannedStockMap.get(stockKey)!;
+          } else {
+            previousStock = await stockReceiptService.getCurrentStoreStock(productId, finalStoreId);
+          }
+
+          const delta = targetQty - previousStock;
+          if (docContext.plannedStockMap) {
+            docContext.plannedStockMap.set(stockKey, targetQty);
+          }
+
+          if (delta > 0) {
+            // Stock increased: Add element to Receipt document (docType 'S')
+            let rDocId = docContext.receiptDocId;
+            if (!rDocId && docContext.getOrCreateReceiptDoc) {
+              rDocId = await docContext.getOrCreateReceiptDoc();
+            }
+            if (rDocId) {
+              await stockReceiptService.addDocumentElement(
+                rDocId,
+                productId,
+                delta,
+                cost !== undefined ? Number(cost) : undefined,
+                finalStoreId
+              );
+              if (docContext.onElementAdded) docContext.onElementAdded('S', productId, delta);
+              debugLog.debug('IMPORT', `Added product ${productId} to receipt doc ${rDocId} with delta +${delta} (current: ${previousStock} -> target: ${targetQty})`);
+            } else {
+              // Direct one-off receipt document if not in batch
+              const oneOffDoc = await stockReceiptService.createStockReceiptDocument(
+                `Stock Adjustment (+) - Product ${productId}`,
+                `Individual replacement adjustment (+${delta})`,
+                undefined,
+                undefined,
+                'S'
+              );
+              await stockReceiptService.addDocumentElement(oneOffDoc.id, productId, delta, cost !== undefined ? Number(cost) : undefined, finalStoreId);
+              await stockReceiptService.conductDocument(oneOffDoc.id);
+            }
+          } else if (delta < 0) {
+            // Stock decreased: Add element to Deduction document (docType 'D')
+            const deductAmount = Math.abs(delta);
+            let dDocId = docContext.deductionDocId;
+            if (!dDocId && docContext.getOrCreateDeductionDoc) {
+              dDocId = await docContext.getOrCreateDeductionDoc();
+            }
+            if (dDocId) {
+              await stockReceiptService.addDocumentElement(
+                dDocId,
+                productId,
+                deductAmount,
+                cost !== undefined ? Number(cost) : undefined,
+                undefined,
+                finalStoreId
+              );
+              if (docContext.onElementAdded) docContext.onElementAdded('D', productId, deductAmount);
+              debugLog.debug('IMPORT', `Added product ${productId} to deduction doc ${dDocId} with delta -${deductAmount} (current: ${previousStock} -> target: ${targetQty})`);
+            } else {
+              // Direct one-off deduction document if not in batch
+              const oneOffDoc = await stockReceiptService.createStockReceiptDocument(
+                `Stock Adjustment (-) - Product ${productId}`,
+                `Individual replacement deduction (-${deductAmount})`,
+                undefined,
+                undefined,
+                'D'
+              );
+              await stockReceiptService.addDocumentElement(oneOffDoc.id, productId, deductAmount, cost !== undefined ? Number(cost) : undefined, undefined, finalStoreId);
+              await stockReceiptService.conductDocument(oneOffDoc.id);
+            }
+          } else {
+            debugLog.debug('IMPORT', `Product ${productId} stock in store ${finalStoreId} is already equal to target ${targetQty}; no document adjustment needed`);
+          }
+
+          // Also set product quantity and custom property 115 (Stock Quantity) to targetQty
+          await productService.setQuantity(productId, targetQty);
+        } catch (stockErr: any) {
+          logger.warn({ err: stockErr, productId, targetQty }, 'Failed to adjust warehouse stock to target');
+          partialNotes.push(`Stock replacement warning: ${stockErr.message}`);
         }
-      }
-
-      // Sync direct store stock
-      try {
-        await stockReceiptService.syncDirectStoreStock(productId, finalStoreId, qtyNum);
-      } catch {
-        // Non-blocking
-      }
-
-      // Also set product quantity field if supported
-      try {
-        await productService.setQuantity(productId, qtyNum);
-      } catch {
-        // Non-blocking
       }
 
       // Also set product reserved quantity (QTY ON ORDER) if provided
@@ -237,9 +311,9 @@ export class StockReceiptImportService {
         status,
         actionTaken,
         bitrixProductId: String(productId),
-        bitrixDocumentId: bitrixDocumentId ? String(bitrixDocumentId) : undefined,
+        bitrixDocumentId: docContext.receiptDocId ? String(docContext.receiptDocId) : (docContext.deductionDocId ? String(docContext.deductionDocId) : undefined),
         warehouseId: finalStoreId,
-        quantityArrived: qtyNum,
+        quantityArrived: targetQty !== undefined ? targetQty : 0,
         purchasePrice: cost !== undefined ? Number(cost) : undefined,
         salesPrice: endUserPrice !== undefined ? Number(endUserPrice) : undefined,
         cost: cost !== undefined ? Number(cost) : undefined,
