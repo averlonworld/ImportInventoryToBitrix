@@ -8,6 +8,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import { previewFile, createImport } from '../services/import.api';
 import { getStockReceiptFields } from '../services/bitrix.api';
 import type { ImportPreview, StockReceiptDiscovery, BitrixStore } from '../types';
+import { estimateTotalDuration } from '../utils/timeEstimate';
 
 // Steps: Upload -> Preview -> Confirm -> Import -> Result
 const STEPS = ['Upload', 'Preview', 'Confirm', 'Import', 'Result'];
@@ -518,9 +519,17 @@ export default function StockReceiptImport() {
               {/* Data Preview */}
               <div className="card space-y-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-gray-700">
-                    File Data Preview ({preview.totalRows} total rows)
-                  </h3>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-semibold text-gray-700">
+                      File Data Preview ({preview.totalRows.toLocaleString()} total rows)
+                    </h3>
+                    <span className="text-xs font-medium text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
+                      <svg className="w-3.5 h-3.5 text-emerald-600 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      Est. time: {estimateTotalDuration(preview.totalRows)}
+                    </span>
+                  </div>
                   <span className="text-xs text-gray-500">Showing first {preview.rows.length} rows</span>
                 </div>
                 <DataPreview preview={preview} />
@@ -601,7 +610,7 @@ export default function StockReceiptImport() {
             {/* Overview Card */}
             <div className="bg-gray-50 rounded-lg p-4 space-y-3 border border-gray-200">
               <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wider">Import Overview</h3>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 text-sm">
                 <div>
                   <span className="text-xs text-gray-500 block">File Name</span>
                   <span className="font-semibold text-gray-900 truncate block">{preview.fileName}</span>
@@ -617,6 +626,15 @@ export default function StockReceiptImport() {
                 <div>
                   <span className="text-xs text-gray-500 block">Quantity Arrived Column</span>
                   <span className="font-semibold text-blue-700">{mapping.quantityArrivedField || 'None'}</span>
+                </div>
+                <div>
+                  <span className="text-xs text-gray-500 block">Est. Duration</span>
+                  <span className="font-semibold text-emerald-700 block flex items-center gap-1">
+                    <svg className="w-3.5 h-3.5 text-emerald-600 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    {estimateTotalDuration(preview.totalRows)}
+                  </span>
                 </div>
               </div>
             </div>
@@ -681,7 +699,7 @@ export default function StockReceiptImport() {
       <ConfirmDialog
         open={confirmOpen}
         title="Confirm Stock Receipt & Catalog Import"
-        message={`Are you ready to import ${preview?.totalRows || 0} rows from "${uploadedFile?.fileName}"?`}
+        message={`Are you ready to import ${preview?.totalRows?.toLocaleString() || 0} rows from "${uploadedFile?.fileName}" into Bitrix24? Estimated processing time: ${estimateTotalDuration(preview?.totalRows || 0)}.`}
         confirmLabel={creatingImport ? 'Starting...' : 'Start Import'}
         onConfirm={handleStartImport}
         onCancel={() => setConfirmOpen(false)}

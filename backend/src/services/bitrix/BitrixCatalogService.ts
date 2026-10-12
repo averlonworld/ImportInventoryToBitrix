@@ -628,6 +628,19 @@ export class BitrixProductService {
   }
 
   async setQuantity(productId: number, quantity: number): Promise<{ supported: boolean; firstProbe: boolean }> {
+    // 1. Always update custom stock quantity property (e.g. Property 115) so grid columns reflect stock on first upload
+    if (this.context.stockQtyPropertyIds && this.context.stockQtyPropertyIds.length > 0) {
+      const crmF: any = {};
+      const catF: any = {};
+      this.context.stockQtyPropertyIds.forEach(propId => {
+        crmF[`PROPERTY_${propId}`] = { value: String(quantity) };
+        catF[`property${propId}`] = { value: String(quantity) };
+      });
+      await this.client.callMethod('catalog.product.update', { id: productId, fields: catF }).catch(() => {});
+      await this.client.callMethod('crm.product.update', { id: productId, fields: crmF }).catch(() => {});
+    }
+
+    // 2. Direct quantity update on commercial catalog (if supported by portal)
     const state = quantitySupport.get(this.context.catalogId) ?? 'unknown';
 
     if (state === false) {
@@ -637,18 +650,6 @@ export class BitrixProductService {
     const firstProbe = state === 'unknown';
 
     try {
-      // Also update custom property if configured so grid columns reflect stock quantity
-      if (this.context.stockQtyPropertyIds && this.context.stockQtyPropertyIds.length > 0) {
-        const crmF: any = {};
-        const catF: any = {};
-        this.context.stockQtyPropertyIds.forEach(propId => {
-          crmF[`PROPERTY_${propId}`] = { value: String(quantity) };
-          catF[`property${propId}`] = { value: String(quantity) };
-        });
-        await this.client.callMethod('catalog.product.update', { id: productId, fields: catF }).catch(() => {});
-        await this.client.callMethod('crm.product.update', { id: productId, fields: crmF }).catch(() => {});
-      }
-
       await this.client.callMethod('catalog.product.update', {
         id: productId,
         fields: { quantity },
@@ -970,6 +971,62 @@ export class BitrixProductService {
       await this.client.callMethod('crm.product.update', { id: numId, fields: syncCrmFields });
     } catch (crmErr: any) {
       logger.warn({ err: crmErr?.message, numId }, 'crm.product.update in createInventoryProduct non-fatal');
+    }
+
+    // Also update commercial catalog element (catalog.product) to guarantee title, description, and custom properties (including Property 115) appear on the first upload
+    try {
+      const syncCatFields: any = { active: 'Y' };
+      if (displayName) syncCatFields.name = displayName;
+      if (codeVal) syncCatFields.code = codeVal;
+      if (descVal) {
+        syncCatFields.detailText = descVal;
+        syncCatFields.previewText = descVal;
+        syncCatFields.detailTextType = 'text';
+        syncCatFields.previewTextType = 'text';
+      }
+      this.context.partNumberPropertyIds?.forEach(propId => {
+        syncCatFields[`property${propId}`] = { value: partNumVal };
+      });
+      this.context.itemCodePropertyIds?.forEach(propId => {
+        syncCatFields[`property${propId}`] = { value: codeVal };
+      });
+      if (this.context.barcodePropertyId && input.barcode) {
+        syncCatFields[`property${this.context.barcodePropertyId}`] = { value: input.barcode.trim() };
+      }
+      if (input.cost !== undefined && input.cost !== null && !isNaN(Number(input.cost))) {
+        syncCatFields.purchasingPrice = Number(input.cost);
+        syncCatFields.purchasingCurrency = this.context.currency;
+        this.context.costPropertyIds?.forEach(propId => {
+          syncCatFields[`property${propId}`] = { value: String(input.cost) };
+        });
+      }
+      if (input.qtyInStock !== undefined && input.qtyInStock !== null && !isNaN(Number(input.qtyInStock))) {
+        syncCatFields.quantity = Number(input.qtyInStock);
+        this.context.stockQtyPropertyIds?.forEach(propId => {
+          syncCatFields[`property${propId}`] = { value: String(input.qtyInStock) };
+        });
+      }
+      if (input.qtyOnOrder !== undefined && input.qtyOnOrder !== null && !isNaN(Number(input.qtyOnOrder))) {
+        this.context.qtyOnOrderPropertyIds?.forEach(propId => {
+          syncCatFields[`property${propId}`] = { value: Number(input.qtyOnOrder) };
+        });
+      }
+      if (input.dealerPrice !== undefined && input.dealerPrice !== null && !isNaN(Number(input.dealerPrice))) {
+        this.context.dealerPricePropertyIds?.forEach(propId => {
+          syncCatFields[`property${propId}`] = { value: String(input.dealerPrice) };
+        });
+      }
+      if (input.endUserPrice !== undefined && input.endUserPrice !== null && !isNaN(Number(input.endUserPrice))) {
+        this.context.endUserPricePropertyIds?.forEach(propId => {
+          syncCatFields[`property${propId}`] = { value: String(input.endUserPrice) };
+        });
+      }
+      await this.client.callMethod('catalog.product.update', {
+        id: numId,
+        fields: syncCatFields,
+      });
+    } catch (catErr: any) {
+      logger.warn({ err: catErr?.message, numId }, 'catalog.product.update in createInventoryProduct non-fatal');
     }
 
     // 4. Sync all price types (Cost, Dealer, End User, Base)

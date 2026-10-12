@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
 import StatusBadge from './StatusBadge';
+import { estimateTotalDuration, estimateRemainingTime, formatElapsedDuration } from '../utils/timeEstimate';
 
 interface ImportProgressProps {
   importId: string;
@@ -67,7 +68,30 @@ export default function ImportProgress({ importId, onComplete }: ImportProgressP
             style={{ width: `${pct}%` }}
           />
         </div>
-        <div className="text-right text-sm font-medium mt-1">{pct}%</div>
+        <div className="flex items-center justify-between text-sm mt-1">
+          <span className="text-xs text-gray-500 font-medium">
+            {!isDone && progress.status === 'PENDING' && (
+              <span>Est. Total Time: <strong>{estimateTotalDuration(total)}</strong></span>
+            )}
+            {!isDone && progress.status === 'PROCESSING' && (
+              <span className="flex items-center gap-1.5 text-blue-700 font-medium">
+                <svg className="w-3.5 h-3.5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Est. Time: <strong>{estimateRemainingTime(total, processed, progress.startedAt).text}</strong>
+                {estimateRemainingTime(total, processed, progress.startedAt).speedText && (
+                  <span className="text-gray-400 font-normal">({estimateRemainingTime(total, processed, progress.startedAt).speedText})</span>
+                )}
+              </span>
+            )}
+            {isDone && (
+              <span className="text-gray-600">
+                Duration: <strong>{formatElapsedDuration(progress.startedAt, progress.completedAt)}</strong>
+              </span>
+            )}
+          </span>
+          <span className="font-semibold text-gray-700">{pct}%</span>
+        </div>
       </div>
 
       <div className="grid grid-cols-4 gap-4 text-center">

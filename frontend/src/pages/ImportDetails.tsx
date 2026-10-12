@@ -4,6 +4,8 @@ import toast from 'react-hot-toast';
 import { getImport, getImportErrors, downloadErrorReport, retryFailed } from '../services/import.api';
 import type { ImportJob, ImportRecord } from '../types';
 import StatusBadge from '../components/StatusBadge';
+import ImportProgress from '../components/ImportProgress';
+import { estimateTotalDuration, estimateRemainingTime, formatElapsedDuration } from '../utils/timeEstimate';
 
 export default function ImportDetails() {
   const { id } = useParams<{ id: string }>();
@@ -157,6 +159,13 @@ export default function ImportDetails() {
         </div>
       </div>
 
+      {/* Live Progress for active jobs */}
+      {['PENDING', 'PROCESSING'].includes(importJob.status) && (
+        <div className="card">
+          <ImportProgress importId={importJob.id} onComplete={loadImport} />
+        </div>
+      )}
+
       {/* Statistics */}
       <div className="card">
         <h3 className="text-lg font-medium mb-4">Statistics</h3>
@@ -190,8 +199,16 @@ export default function ImportDetails() {
             <div className="text-xs text-gray-500">Skipped</div>
           </div>
           <div className="text-center">
-            <div className="text-2xl font-bold">{duration !== null ? `${duration}s` : '-'}</div>
-            <div className="text-xs text-gray-500">Duration</div>
+            <div className="text-base font-bold text-gray-900 truncate">
+              {duration !== null
+                ? formatElapsedDuration(importJob.startedAt, importJob.completedAt)
+                : importJob.status === 'PROCESSING'
+                ? estimateRemainingTime(importJob.totalRows, importJob.processedRows, importJob.startedAt).text
+                : estimateTotalDuration(importJob.totalRows)}
+            </div>
+            <div className="text-xs text-gray-500">
+              {duration !== null ? 'Duration' : 'Est. Time'}
+            </div>
           </div>
         </div>
       </div>

@@ -180,6 +180,18 @@ export class BitrixStockReceiptService {
       if (sp && sp.amount !== undefined && sp.amount !== null && !isNaN(Number(sp.amount))) {
         return Number(sp.amount);
       }
+
+      // Fallback: if store product record is not yet initialized, check product catalog quantity
+      try {
+        const pRes = await this.client.callMethod('catalog.product.get', { id: Number(productId) });
+        const pQty = pRes && pRes.product && pRes.product.quantity;
+        if (pQty !== undefined && pQty !== null && !isNaN(Number(pQty))) {
+          return Number(pQty);
+        }
+      } catch {
+        // Non-blocking fallback
+      }
+
       return 0;
     } catch (err: any) {
       logger.warn({ err: err?.message, productId, storeId }, 'Failed to fetch current store stock; defaulting to 0');

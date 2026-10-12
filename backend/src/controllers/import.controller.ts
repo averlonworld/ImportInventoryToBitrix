@@ -209,9 +209,13 @@ export class ImportController {
         };
       });
 
-      await prisma.importRecord.createMany({
-        data: recordsData,
-      });
+      // Chunk insertions in 500-row batches to stay well under PostgreSQL's 65,535 parameter limit
+      const CHUNK_SIZE = 500;
+      for (let i = 0; i < recordsData.length; i += CHUNK_SIZE) {
+        await prisma.importRecord.createMany({
+          data: recordsData.slice(i, i + CHUNK_SIZE),
+        });
+      }
 
       // Queue the job
       let queuePayload: any;

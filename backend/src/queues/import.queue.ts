@@ -28,6 +28,8 @@ export function createImportWorker(processor: (job: Job<ImportJobData>) => Promi
   const worker = new Worker<ImportJobData>('import-queue', processor, {
     connection: redisConnection,
     concurrency: 1,
+    lockDuration: 1800000, // 30 minutes lock duration for bulk jobs (e.g. 2000 - 4000+ items)
+    maxStalledCount: 2,
   });
 
   worker.on('completed', (job) => {

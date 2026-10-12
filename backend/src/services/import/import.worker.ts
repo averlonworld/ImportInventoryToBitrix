@@ -214,38 +214,50 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
       }
     }
 
+    let receiptDocPromise: Promise<number> | null = null;
     const getOrCreateReceiptDoc = async (): Promise<number> => {
-      if (!receiptDocId) {
-        const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
-        const stockReceiptService = new BitrixStockReceiptService(client);
-        const doc = await stockReceiptService.createStockReceiptDocument(
-          `${docTitle} (Adjustment +)`,
-          `Stock replacement upward adjustment for import job ${importJobId}`,
-          undefined,
-          undefined,
-          'S'
-        );
-        receiptDocId = doc.id;
-        logger.info(`Created Bitrix stock receipt document ID ${receiptDocId} for job ${importJobId}`);
+      if (receiptDocId) return receiptDocId;
+      if (!receiptDocPromise) {
+        receiptDocPromise = (async () => {
+          const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
+          const stockReceiptService = new BitrixStockReceiptService(client);
+          const doc = await stockReceiptService.createStockReceiptDocument(
+            `${docTitle} (Adjustment +)`,
+            `Stock replacement upward adjustment for import job ${importJobId}`,
+            undefined,
+            undefined,
+            'S'
+          );
+          receiptDocId = doc.id;
+          stockAdjustmentContext.receiptDocId = doc.id;
+          logger.info(`Created Bitrix stock receipt document ID ${receiptDocId} for job ${importJobId}`);
+          return doc.id;
+        })();
       }
-      return receiptDocId;
+      return receiptDocPromise;
     };
 
+    let deductionDocPromise: Promise<number> | null = null;
     const getOrCreateDeductionDoc = async (): Promise<number> => {
-      if (!deductionDocId) {
-        const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
-        const stockReceiptService = new BitrixStockReceiptService(client);
-        const doc = await stockReceiptService.createStockReceiptDocument(
-          `${docTitle} (Adjustment -)`,
-          `Stock replacement downward adjustment (write-off) for import job ${importJobId}`,
-          undefined,
-          undefined,
-          'D'
-        );
-        deductionDocId = doc.id;
-        logger.info(`Created Bitrix stock deduction document ID ${deductionDocId} for job ${importJobId}`);
+      if (deductionDocId) return deductionDocId;
+      if (!deductionDocPromise) {
+        deductionDocPromise = (async () => {
+          const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
+          const stockReceiptService = new BitrixStockReceiptService(client);
+          const doc = await stockReceiptService.createStockReceiptDocument(
+            `${docTitle} (Adjustment -)`,
+            `Stock replacement downward adjustment (write-off) for import job ${importJobId}`,
+            undefined,
+            undefined,
+            'D'
+          );
+          deductionDocId = doc.id;
+          stockAdjustmentContext.deductionDocId = doc.id;
+          logger.info(`Created Bitrix stock deduction document ID ${deductionDocId} for job ${importJobId}`);
+          return doc.id;
+        })();
       }
-      return deductionDocId;
+      return deductionDocPromise;
     };
 
     const stockAdjustmentContext: StockAdjustmentContext = {
@@ -258,6 +270,8 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
         else if (docType === 'D') deductionElemCount++;
       },
     };
+
+    const seenCodes = new Set<string>();
 
     // Load pending records, draining the queue until none remain.
     // NOTE: skip is always 0 because processed records leave the PENDING set;
@@ -281,7 +295,6 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
 
       // Process each record asynchronously with controlled concurrency
       const concurrency = bitrixConfig.concurrency || 5;
-      const seenCodes = new Set<string>();
 
       const worker = async (record: any): Promise<void> => {
         try {
@@ -396,6 +409,17 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
         const chunk = pendingRecords.slice(i, i + concurrency);
         await Promise.all(chunk.map(worker));
       }
+
+      // Keep BullMQ job alive and update real-time progress in Redis
+      try {
+        const processedSoFar = await prisma.importRecord.count({
+          where: { importJobId, status: { not: 'PENDING' } },
+        });
+        const percent = Math.min(100, Math.round((processedSoFar / (importJob.totalRows || 1)) * 100));
+        await job.updateProgress(percent);
+      } catch {
+        // Non-blocking progress update
+      }
     }
 
     // Reconciliation: records left PENDING/PROCESSING mean the run was interrupted
@@ -442,7 +466,7 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
 
                 const docFields: any = {};
                 if (docTotal > 0) docFields.total = docTotal;
-                docFields.commentary = `${typeLabel}: ${docTitle} (${elems.length} items adjusted)`;
+                docFields.commentary = `${typeLabel}: ${docTitle} (${count} items adjusted)`;
                 await client.callMethod('catalog.document.update', {
                   id: Number(docId),
                   fields: docFields,

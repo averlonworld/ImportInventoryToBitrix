@@ -231,6 +231,7 @@ export class StockReceiptImportService {
             let rDocId = docContext.receiptDocId;
             if (!rDocId && docContext.getOrCreateReceiptDoc) {
               rDocId = await docContext.getOrCreateReceiptDoc();
+              docContext.receiptDocId = rDocId;
             }
             if (rDocId) {
               await stockReceiptService.addDocumentElement(
@@ -260,6 +261,7 @@ export class StockReceiptImportService {
             let dDocId = docContext.deductionDocId;
             if (!dDocId && docContext.getOrCreateDeductionDoc) {
               dDocId = await docContext.getOrCreateDeductionDoc();
+              docContext.deductionDocId = dDocId;
             }
             if (dDocId) {
               await stockReceiptService.addDocumentElement(
