@@ -116,6 +116,18 @@ export default function Login() {
               </div>
             </div>
 
+            {/* Forgot Password */}
+            <div className="flex justify-end">
+              <a
+                href="https://forgotpass.utkarshmishra.online/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs font-medium text-blue-600 hover:text-blue-700 hover:underline"
+              >
+                Forgot Password?
+              </a>
+            </div>
+
             {/* Error Message Alert */}
             {errorMessage && (
               <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2">
