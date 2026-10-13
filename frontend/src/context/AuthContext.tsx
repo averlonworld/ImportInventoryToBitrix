@@ -42,6 +42,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (email: string, password?: string) => {
     const res = await loginApi(email, password);
     if (res.success && res.data) {
+      if (res.data.token) {
+        localStorage.setItem('auth_token', res.data.token);
+      }
       setUser(res.data.user);
       if (res.data.license) {
         setLicense(res.data.license);
@@ -56,6 +59,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loginWithLicentic = async (email: string, productId?: string) => {
     const res = await licenticLoginApi(email, productId);
     if (res.success && res.data) {
+      if (res.data.token) {
+        localStorage.setItem('auth_token', res.data.token);
+      }
       setUser(res.data.user);
       if (res.data.license) {
         setLicense(res.data.license);
@@ -71,6 +77,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await logoutApi();
     } finally {
+      localStorage.removeItem('auth_token');
       setUser(null);
       setLicense(null);
     }

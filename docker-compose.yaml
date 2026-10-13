@@ -1,0 +1,82 @@
+services:
+
+  # ==========================================
+  # Redis (BullMQ queue backing store)
+  # ==========================================
+  redis:
+    image: redis:7-alpine
+    container_name: bitrix-inventory-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - prod-network
+
+  # ==========================================
+  # Backend (Express + Prisma)
+  # ==========================================
+  bitrix-inventory-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bitrix-inventory-backend
+    restart: unless-stopped
+    expose:
+      - "5000"
+    env_file:
+      - ./.env
+    environment:
+      # Force production regardless of the local .env value.
+      NODE_ENV: production
+      PORT: "5000"
+      # Always address the sibling containers, never localhost.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-b24_inventory}:Inventory7897@postgres:5432/${POSTGRES_DB:-bitrix_inventory}
+      REDIS_URL: redis://redis:6379
+      COOKIE_SECURE: "true"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - prod-network
+      - lms-network
+
+  # ==========================================
+  # Frontend (React + Vite, served by Nginx)
+  # ==========================================
+  bitrix-inventory-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
+    container_name: bitrix-inventory-frontend
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      - bitrix-inventory-backend
+    networks:
+      - prod-network
+      - lms-network
+
+networks:
+  prod-network:
+    external: true
+  lms-network:
+    external: true
+
+volumes:
+  redis_data:
+

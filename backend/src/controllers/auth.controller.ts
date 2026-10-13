@@ -22,10 +22,12 @@ export class AuthController {
       const { user, token, license } = await authService.login(email, password);
       debugLog.info('AUTH', `Login successful for ${user.email} (${license ? `Licentic: ${license.planName}` : 'Standard'})`);
 
+      // Enable cross-site iframe cookies (SameSite=None, Secure=true) for Bitrix24 embedding
+      const isSecure = env.NODE_ENV === 'production' || env.COOKIE_SECURE;
       const cookieOptions: Record<string, unknown> = {
         httpOnly: true,
-        secure: env.COOKIE_SECURE,
-        sameSite: 'lax',
+        secure: isSecure,
+        sameSite: isSecure ? 'none' : 'lax',
         maxAge: 24 * 60 * 60 * 1000,
       };
       if (env.COOKIE_DOMAIN) cookieOptions.domain = env.COOKIE_DOMAIN;
@@ -48,18 +50,20 @@ export class AuthController {
    */
   async licenticLogin(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { email, password } = req.body;
+      const { email, productId } = req.body;
       if (!email || !String(email).trim()) {
         throw new AppError('Email address is required', 400);
       }
 
-      const { user, token, license } = await authService.login(email, password);
+      const { user, token, license } = await authService.loginWithLicentic(email, productId);
       debugLog.info('AUTH', `Licentic license login successful for ${user.email} (Plan: ${license?.planName})`);
 
+      // Enable cross-site iframe cookies (SameSite=None, Secure=true) for Bitrix24 embedding
+      const isSecure = env.NODE_ENV === 'production' || env.COOKIE_SECURE;
       const cookieOptions: Record<string, unknown> = {
         httpOnly: true,
-        secure: env.COOKIE_SECURE,
-        sameSite: 'lax',
+        secure: isSecure,
+        sameSite: isSecure ? 'none' : 'lax',
         maxAge: 24 * 60 * 60 * 1000,
       };
       if (env.COOKIE_DOMAIN) cookieOptions.domain = env.COOKIE_DOMAIN;
@@ -98,10 +102,11 @@ export class AuthController {
   }
 
   async logout(_req: AuthenticatedRequest, res: Response): Promise<void> {
+    const isSecure = env.NODE_ENV === 'production' || env.COOKIE_SECURE;
     const cookieOptions: Record<string, unknown> = {
       httpOnly: true,
-      secure: env.COOKIE_SECURE,
-      sameSite: 'lax',
+      secure: isSecure,
+      sameSite: isSecure ? 'none' : 'lax',
     };
     if (env.COOKIE_DOMAIN) cookieOptions.domain = env.COOKIE_DOMAIN;
 
@@ -120,3 +125,4 @@ export class AuthController {
 }
 
 export const authController = new AuthController();
+
