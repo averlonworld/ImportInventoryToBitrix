@@ -333,6 +333,345 @@ export class StockReceiptImportService {
       };
     }
   }
+
+  async processBatch(
+    batchItems: Array<{ recordId: string; rowData: StockReceiptRowData }>,
+    mapping: StockReceiptMapping,
+    importMode: string,
+    docContext: StockAdjustmentContext,
+    storesList?: BitrixStore[],
+    clientOrUserId?: BitrixClient | string
+  ): Promise<Map<string, StockReceiptResult>> {
+    const results = new Map<string, StockReceiptResult>();
+    if (batchItems.length === 0) return results;
+
+    const client = clientOrUserId instanceof BitrixClient
+      ? clientOrUserId
+      : await BitrixClient.fromDbConfiguration(clientOrUserId);
+    const catalogService = new BitrixCatalogService(client);
+    const stockReceiptService = new BitrixStockReceiptService(client);
+    const context = await catalogService.getCatalogContext();
+    const productService = new BitrixProductService(client, context);
+
+    // Resolve default store ID
+    let resolvedDefaultStoreId = 1;
+    if (mapping.defaultStoreId) {
+      resolvedDefaultStoreId = Number(mapping.defaultStoreId);
+    } else if (storesList && storesList.length > 0) {
+      const mainStore = storesList.find(s => s.title.toLowerCase().includes('main') || s.id === 62) || storesList[0];
+      resolvedDefaultStoreId = mainStore ? mainStore.id : 1;
+    }
+
+    // Step 1: Pre-validate each row
+    const eligibleItems: Array<{
+      recordId: string;
+      rowData: StockReceiptRowData;
+      code: string;
+      partNumber: string;
+      description: string;
+      barcode?: string;
+      cost?: number;
+      dealerPrice?: number;
+      endUserPrice?: number;
+      qtyInStock?: number;
+      qtyOnOrder?: number;
+      targetStoreId: number;
+    }> = [];
+
+    for (const item of batchItems) {
+      const row = item.rowData;
+      const code = (row.code || row.sku || '').trim();
+      const partNumber = (row.partNumber || row.name || '').trim();
+      const description = (row.description || row.name || '').trim();
+      const barcode = (row.barcode || '').trim();
+      const cost = row.cost ?? row.purchasePrice;
+      const dealerPrice = row.dealerPrice;
+      const endUserPrice = row.endUserPrice ?? row.salesPrice;
+      const qtyInStock = row.qtyInStock ?? row.quantityArrived;
+      const qtyOnOrder = row.qtyOnOrder;
+
+      if (!code) {
+        results.set(item.recordId, { status: 'FAILED', errorMessage: 'CODE field is mandatory' });
+        continue;
+      }
+      if (!description) {
+        results.set(item.recordId, { status: 'FAILED', errorMessage: 'DESCRIPTION field is mandatory' });
+        continue;
+      }
+
+      // Warehouse resolution
+      let storeId = resolvedDefaultStoreId;
+      if (row.warehouse && storesList && storesList.length > 0) {
+        const whRaw = String(row.warehouse).trim().toLowerCase();
+        const matched = storesList.find(s =>
+          String(s.id) === whRaw ||
+          s.title.toLowerCase() === whRaw ||
+          s.title.toLowerCase().includes(whRaw)
+        );
+        if (matched) storeId = matched.id;
+      }
+
+      eligibleItems.push({
+        recordId: item.recordId,
+        rowData: row,
+        code,
+        partNumber: partNumber || code,
+        description,
+        barcode: barcode || undefined,
+        cost: cost !== undefined && !isNaN(Number(cost)) ? Number(cost) : undefined,
+        dealerPrice: dealerPrice !== undefined && !isNaN(Number(dealerPrice)) ? Number(dealerPrice) : undefined,
+        endUserPrice: endUserPrice !== undefined && !isNaN(Number(endUserPrice)) ? Number(endUserPrice) : undefined,
+        qtyInStock: qtyInStock !== undefined && qtyInStock !== null && !isNaN(Number(qtyInStock)) ? Number(qtyInStock) : undefined,
+        qtyOnOrder: qtyOnOrder !== undefined && qtyOnOrder !== null && !isNaN(Number(qtyOnOrder)) ? Number(qtyOnOrder) : undefined,
+        targetStoreId: storeId,
+      });
+    }
+
+    if (eligibleItems.length === 0) return results;
+
+    // Step 2: Batch product lookup (1 call for 50 codes)
+    const codesToLookup = eligibleItems.map(it => it.code);
+    const foundProductMap = await productService.batchFindProductsByCodes(codesToLookup);
+
+    // Filter out items based on importMode and map existing IDs
+    const itemsToProcess: typeof eligibleItems = [];
+    const itemExistingProduct = new Map<string, any>();
+
+    for (const item of eligibleItems) {
+      let existing = foundProductMap.get(item.code.toUpperCase());
+      // Fallback for SKU if different from code
+      if (!existing && item.rowData.sku && item.rowData.sku !== item.code) {
+        existing = await productService.findProductBySku(item.rowData.sku);
+      }
+      if (!existing && item.barcode) {
+        existing = await productService.findProductByBarcode(item.barcode);
+      }
+
+      if (importMode === 'UPDATE_ONLY' && !existing) {
+        results.set(item.recordId, {
+          status: 'SKIPPED',
+          errorMessage: 'Product does not exist in catalog (Update Only mode)',
+        });
+        continue;
+      }
+
+      itemExistingProduct.set(item.recordId, existing);
+      itemsToProcess.push(item);
+    }
+
+    if (itemsToProcess.length === 0) return results;
+
+    // Step 3: Batch Create / Update products (1 batch call for 50 products)
+    const batchOps = itemsToProcess.map(item => {
+      const existing = itemExistingProduct.get(item.recordId);
+      return {
+        key: item.recordId,
+        code: item.code,
+        existingProductId: existing ? Number(existing.id) : undefined,
+        input: {
+          code: item.code,
+          partNumber: item.partNumber,
+          description: item.description,
+          cost: item.cost,
+          dealerPrice: item.dealerPrice,
+          endUserPrice: item.endUserPrice,
+          qtyOnOrder: item.qtyOnOrder,
+          qtyInStock: item.qtyInStock,
+          barcode: item.barcode,
+        },
+      };
+    });
+
+    const syncProductResults = await productService.batchCreateOrUpdateProducts(batchOps);
+
+    // Step 4: Batch Price Sync (1 batch call for 50 products)
+    const priceItems: Array<{ productId: number; cost?: number; dealerPrice?: number; endUserPrice?: number }> = [];
+    for (const item of itemsToProcess) {
+      const opRes = syncProductResults.get(item.recordId);
+      if (opRes && opRes.id > 0 && !opRes.error) {
+        priceItems.push({
+          productId: opRes.id,
+          cost: item.cost,
+          dealerPrice: item.dealerPrice,
+          endUserPrice: item.endUserPrice,
+        });
+      }
+    }
+
+    if (priceItems.length > 0) {
+      try {
+        await productService.batchSyncPrices(priceItems);
+      } catch (priceErr: any) {
+        logger.warn({ err: priceErr?.message }, 'Batch price sync encountered non-fatal error');
+      }
+    }
+
+    // Step 5: Stock Replacement & Batch Document Elements (1 batch call for 50 products)
+    const receiptElements: Array<{ docId: number; productId: number; amount: number; purchasingPrice?: number; storeTo?: number }> = [];
+    const deductionElements: Array<{ docId: number; productId: number; amount: number; purchasingPrice?: number; storeFrom?: number }> = [];
+
+    const itemAdjustmentInfo = new Map<string, { productId: number; delta: number; targetQty?: number; actionTaken: 'CREATED' | 'UPDATED'; partialNotes: string[] }>();
+
+    for (const item of itemsToProcess) {
+      const opRes = syncProductResults.get(item.recordId);
+      if (!opRes || !opRes.id || opRes.error) {
+        results.set(item.recordId, {
+          status: 'FAILED',
+          errorMessage: opRes?.error || 'Failed to obtain Bitrix product ID',
+        });
+        continue;
+      }
+
+      const productId = opRes.id;
+      const partialNotes: string[] = [];
+      const hasValidStockQty = item.qtyInStock !== undefined && item.qtyInStock !== null && !isNaN(Number(item.qtyInStock));
+      const targetQty = hasValidStockQty ? Math.max(0, Number(item.qtyInStock)) : undefined;
+      let delta = 0;
+
+      if (targetQty !== undefined) {
+        const stockKey = `${productId}_${item.targetStoreId}`;
+        let previousStock = 0;
+        if (docContext.plannedStockMap && docContext.plannedStockMap.has(stockKey)) {
+          previousStock = docContext.plannedStockMap.get(stockKey)!;
+        } else {
+          previousStock = await stockReceiptService.getCurrentStoreStock(productId, item.targetStoreId);
+        }
+
+        delta = targetQty - previousStock;
+        if (delta === 0 && docContext.plannedStockMap) {
+          docContext.plannedStockMap.set(stockKey, targetQty);
+        }
+      }
+
+      itemAdjustmentInfo.set(item.recordId, {
+        productId,
+        delta,
+        targetQty,
+        actionTaken: opRes.actionTaken,
+        partialNotes,
+      });
+    }
+
+    // Collect elements for documents
+    for (const item of itemsToProcess) {
+      const info = itemAdjustmentInfo.get(item.recordId);
+      if (!info) continue;
+
+      if (info.delta > 0) {
+        receiptElements.push({
+          docId: 0,
+          productId: info.productId,
+          amount: info.delta,
+          purchasingPrice: item.cost,
+          storeTo: item.targetStoreId,
+        });
+      } else if (info.delta < 0) {
+        deductionElements.push({
+          docId: 0,
+          productId: info.productId,
+          amount: Math.abs(info.delta),
+          purchasingPrice: item.cost,
+          storeFrom: item.targetStoreId,
+        });
+      }
+    }
+
+    // Add elements to Receipt document if any
+    if (receiptElements.length > 0) {
+      try {
+        let rDocId = docContext.receiptDocId;
+        if (!rDocId && docContext.getOrCreateReceiptDoc) {
+          rDocId = await docContext.getOrCreateReceiptDoc();
+          docContext.receiptDocId = rDocId;
+        }
+        if (rDocId) {
+          receiptElements.forEach(el => (el.docId = rDocId!));
+          const addRes = await stockReceiptService.batchAddDocumentElements(receiptElements);
+          receiptElements.forEach((el, idx) => {
+            const elRes = addRes.results?.[idx];
+            if (elRes && elRes.success) {
+              if (docContext.onElementAdded) docContext.onElementAdded('S', el.productId, el.amount);
+              if (docContext.plannedStockMap && el.storeTo) {
+                docContext.plannedStockMap.set(`${el.productId}_${el.storeTo}`, el.amount);
+              }
+            } else {
+              const matchedItem = itemsToProcess.find(it => {
+                const info = itemAdjustmentInfo.get(it.recordId);
+                return info && info.productId === el.productId;
+              });
+              if (matchedItem) {
+                const info = itemAdjustmentInfo.get(matchedItem.recordId);
+                if (info) info.partialNotes.push(`Failed to add item to receipt document: ${elRes?.error || 'Bitrix error'}`);
+              }
+            }
+          });
+        }
+      } catch (err: any) {
+        logger.warn({ err: err?.message }, 'Failed to batch add receipt elements');
+      }
+    }
+
+    // Add elements to Deduction document if any
+    if (deductionElements.length > 0) {
+      try {
+        let dDocId = docContext.deductionDocId;
+        if (!dDocId && docContext.getOrCreateDeductionDoc) {
+          dDocId = await docContext.getOrCreateDeductionDoc();
+          docContext.deductionDocId = dDocId;
+        }
+        if (dDocId) {
+          deductionElements.forEach(el => (el.docId = dDocId!));
+          const addRes = await stockReceiptService.batchAddDocumentElements(deductionElements);
+          deductionElements.forEach((el, idx) => {
+            const elRes = addRes.results?.[idx];
+            if (elRes && elRes.success) {
+              if (docContext.onElementAdded) docContext.onElementAdded('D', el.productId, el.amount);
+              if (docContext.plannedStockMap && el.storeFrom) {
+                docContext.plannedStockMap.set(`${el.productId}_${el.storeFrom}`, 0);
+              }
+            } else {
+              const matchedItem = itemsToProcess.find(it => {
+                const info = itemAdjustmentInfo.get(it.recordId);
+                return info && info.productId === el.productId;
+              });
+              if (matchedItem) {
+                const info = itemAdjustmentInfo.get(matchedItem.recordId);
+                if (info) info.partialNotes.push(`Failed to add item to deduction document: ${elRes?.error || 'Bitrix error'}`);
+              }
+            }
+          });
+        }
+      } catch (err: any) {
+        logger.warn({ err: err?.message }, 'Failed to batch add deduction elements');
+      }
+    }
+
+    // Build final results map for each record
+    for (const item of itemsToProcess) {
+      const info = itemAdjustmentInfo.get(item.recordId);
+      if (!info) continue;
+
+      const status: StockReceiptResultStatus = info.partialNotes.length > 0 ? 'PARTIAL_FAILURE' : 'SUCCESS';
+
+      results.set(item.recordId, {
+        status,
+        actionTaken: info.actionTaken,
+        bitrixProductId: String(info.productId),
+        bitrixDocumentId: docContext.receiptDocId ? String(docContext.receiptDocId) : (docContext.deductionDocId ? String(docContext.deductionDocId) : undefined),
+        warehouseId: item.targetStoreId,
+        quantityArrived: info.targetQty !== undefined ? info.targetQty : 0,
+        purchasePrice: item.cost,
+        salesPrice: item.endUserPrice,
+        cost: item.cost,
+        dealerPrice: item.dealerPrice,
+        endUserPrice: item.endUserPrice,
+        qtyOnOrder: item.qtyOnOrder,
+        errorMessage: info.partialNotes.length > 0 ? info.partialNotes.join('; ') : undefined,
+      });
+    }
+
+    return results;
+  }
 }
 
 export const stockReceiptImportService = new StockReceiptImportService();

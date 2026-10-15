@@ -199,6 +199,84 @@ export class BitrixStockReceiptService {
     }
   }
 
+  async preloadWarehouseStock(storeId: number = 1): Promise<Map<string, number>> {
+    const stockMap = new Map<string, number>();
+    try {
+      let start = 0;
+      while (true) {
+        const res = await (this.client as any).request('post', 'catalog.storeproduct.list', {
+          filter: { storeId: Number(storeId) },
+          select: ['id', 'productId', 'amount'],
+          start,
+        });
+        const items = res?.result?.storeProducts || [];
+        for (const item of items) {
+          if (item.productId && item.amount !== undefined && item.amount !== null) {
+            stockMap.set(`${item.productId}_${storeId}`, Number(item.amount));
+          }
+        }
+        if (!res?.next || items.length === 0) {
+          break;
+        }
+        start = res.next;
+      }
+      debugLog.info('BITRIX', `Preloaded ${stockMap.size} store product records for store ${storeId}`);
+    } catch (err: any) {
+      logger.warn({ err: err?.message, storeId }, 'Failed to preload warehouse stock; will use on-demand lookups');
+    }
+    return stockMap;
+  }
+
+  async batchAddDocumentElements(
+    elements: Array<{
+      docId: number;
+      productId: number;
+      amount: number;
+      purchasingPrice?: number;
+      storeTo?: number;
+      storeFrom?: number;
+    }>
+  ): Promise<{ added: number; failed: number; results?: Array<{ success: boolean; result?: any; error?: string }> }> {
+    const valid = elements.filter(el => Number(el.amount) > 0);
+    if (valid.length === 0) return { added: 0, failed: 0, results: [] };
+
+    const calls = valid.map(el => {
+      const fields: any = {
+        docId: Number(el.docId),
+        ownerId: Number(el.docId),
+        elementId: Number(el.productId),
+        productId: Number(el.productId),
+        amount: Number(el.amount),
+      };
+      if (el.purchasingPrice !== undefined && el.purchasingPrice !== null && !isNaN(Number(el.purchasingPrice))) {
+        fields.purchasingPrice = Number(el.purchasingPrice);
+      }
+      if (el.storeFrom && Number(el.storeFrom) > 0) {
+        fields.storeFrom = Number(el.storeFrom);
+      }
+      if (el.storeTo && Number(el.storeTo) > 0) {
+        fields.storeTo = Number(el.storeTo);
+      } else if (!el.storeFrom) {
+        fields.storeTo = 1;
+      }
+      return {
+        method: 'catalog.document.element.add',
+        params: { fields },
+      };
+    });
+
+    const batchResults = await this.client.batch(calls);
+    let added = 0;
+    let failed = 0;
+    batchResults.forEach(r => {
+      if (r && r.success) added++;
+      else failed++;
+    });
+
+    debugLog.info('BITRIX', `Batch added ${added} elements to inventory documents (${failed} failed)`);
+    return { added, failed, results: batchResults };
+  }
+
   async deleteDocument(docId: number): Promise<boolean> {
     try {
       await this.client.callMethod('catalog.document.delete', { id: Number(docId) });

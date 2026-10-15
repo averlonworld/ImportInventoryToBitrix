@@ -15,6 +15,29 @@ const retryableThrottleCodes = [
   'REST_HEAVY_SYSTEM_RESPONSE',
 ];
 
+export function serializeBitrixParams(params: any, prefix = ''): string {
+  if (!params || typeof params !== 'object') return '';
+  const pairs: string[] = [];
+  for (const [key, val] of Object.entries(params)) {
+    if (val === undefined || val === null) continue;
+    const fullKey = prefix ? `${prefix}[${key}]` : key;
+    if (Array.isArray(val)) {
+      val.forEach((item, idx) => {
+        if (typeof item === 'object' && item !== null) {
+          pairs.push(serializeBitrixParams(item, `${fullKey}[${idx}]`));
+        } else {
+          pairs.push(`${encodeURIComponent(`${fullKey}[${idx}]`)}=${encodeURIComponent(String(item))}`);
+        }
+      });
+    } else if (typeof val === 'object') {
+      pairs.push(serializeBitrixParams(val, fullKey));
+    } else {
+      pairs.push(`${encodeURIComponent(fullKey)}=${encodeURIComponent(String(val))}`);
+    }
+  }
+  return pairs.filter(Boolean).join('&');
+}
+
 export class BitrixClient {
   private instance: AxiosInstance;
 
@@ -131,28 +154,145 @@ export class BitrixClient {
     const results: any[] = [];
 
     for (let i = 0; i < calls.length; i += BATCH_SIZE) {
-      const batch = calls.slice(i, i + BATCH_SIZE);
-      
-      // Build cmd for batch request
+      const batchChunk = calls.slice(i, i + BATCH_SIZE);
       const cmd: Record<string, string> = {};
-      batch.forEach((call, idx) => {
-        const paramsStr = Object.entries(call.params || {})
-          .map(([k, v]) => JSON.stringify(v))
-          .join(',');
-        cmd[`call_${idx}`] = call.method + `${paramsStr ? '?' + paramsStr : ''}`;
+      batchChunk.forEach((call, idx) => {
+        const qs = serializeBitrixParams(call.params || {});
+        cmd[`call_${idx}`] = `${call.method}${qs ? '?' + qs : ''}`;
       });
 
       try {
-        const response = await this.request<BitrixBatchResponse>('post', 'batch', { cmd });
-        results.push(...(response.result || []));
-      } catch (error) {
+        const response = await this.request<BitrixBatchResponse>('post', 'batch', { halt: 0, cmd });
+        const resData = response.result?.result || {};
+        const errData = response.result?.result_error || {};
+
+        batchChunk.forEach((_, idx) => {
+          const key = `call_${idx}`;
+          if (errData[key]) {
+            const errObj = errData[key];
+            const errMsg = errObj?.error_description || errObj?.error || (typeof errObj === 'string' ? errObj : 'Batch command error');
+            results.push({ success: false, error: errMsg });
+          } else {
+            results.push({ success: true, result: resData[key] });
+          }
+        });
+      } catch (error: any) {
         logger.error({ err: error }, 'Batch request failed');
-        // Return nulls for failed batch to allow per-item handling
-        batch.forEach(() => results.push(null));
+        batchChunk.forEach(() => results.push({ success: false, error: error?.message || 'Batch HTTP failed' }));
+      }
+
+      // Auto-retry failed calls in this chunk (up to 2 attempts)
+      const chunkStartIndex = results.length - batchChunk.length;
+      let failedIndices = batchChunk.map((_, idx) => idx).filter(idx => !results[chunkStartIndex + idx].success);
+      let batchRetryCount = 0;
+
+      while (failedIndices.length > 0 && batchRetryCount < 2) {
+        batchRetryCount++;
+        await new Promise(resolve => setTimeout(resolve, 1000 * batchRetryCount));
+
+        const retryCmd: Record<string, string> = {};
+        failedIndices.forEach(idx => {
+          const call = batchChunk[idx];
+          const qs = serializeBitrixParams(call.params || {});
+          retryCmd[`call_${idx}`] = `${call.method}${qs ? '?' + qs : ''}`;
+        });
+
+        try {
+          const retryResp = await this.request<BitrixBatchResponse>('post', 'batch', { halt: 0, cmd: retryCmd });
+          const retryResData = retryResp.result?.result || {};
+          const retryErrData = retryResp.result?.result_error || {};
+
+          failedIndices.forEach(idx => {
+            const key = `call_${idx}`;
+            const targetIndex = chunkStartIndex + idx;
+            if (!retryErrData[key] && retryResData[key] !== undefined) {
+              results[targetIndex] = { success: true, result: retryResData[key] };
+            } else if (retryErrData[key]) {
+              const errObj = retryErrData[key];
+              const errMsg = errObj?.error_description || errObj?.error || 'Batch command error';
+              results[targetIndex] = { success: false, error: errMsg };
+            }
+          });
+        } catch {
+          // Keep existing failure if retry request failed
+        }
+        failedIndices = batchChunk.map((_, idx) => idx).filter(idx => !results[chunkStartIndex + idx].success);
       }
     }
 
     return results;
+  }
+
+  async batchNamed(commands: Record<string, { method: string; params?: any }>): Promise<{ result: Record<string, any>; errors: Record<string, any> }> {
+    const keys = Object.keys(commands);
+    const BATCH_SIZE = 50;
+    const combinedResult: Record<string, any> = {};
+    const combinedErrors: Record<string, any> = {};
+
+    for (let i = 0; i < keys.length; i += BATCH_SIZE) {
+      const batchKeys = keys.slice(i, i + BATCH_SIZE);
+      const cmd: Record<string, string> = {};
+      batchKeys.forEach(k => {
+        const call = commands[k];
+        const qs = serializeBitrixParams(call.params || {});
+        cmd[k] = `${call.method}${qs ? '?' + qs : ''}`;
+      });
+
+      try {
+        const response = await this.request<BitrixBatchResponse>('post', 'batch', { halt: 0, cmd });
+        const resData = response.result?.result || {};
+        const errData = response.result?.result_error || {};
+
+        batchKeys.forEach(k => {
+          if (errData[k]) {
+            combinedErrors[k] = errData[k];
+          } else {
+            combinedResult[k] = resData[k];
+          }
+        });
+      } catch (error: any) {
+        logger.error({ err: error }, 'BatchNamed request failed');
+        batchKeys.forEach(k => {
+          combinedErrors[k] = { error: 'BATCH_FAILED', error_description: error?.message || 'Batch execution failed' };
+        });
+      }
+
+      // Auto-retry failed commands within this chunk (up to 2 attempts)
+      let failedKeys = batchKeys.filter(k => combinedErrors[k]);
+      let retryCount = 0;
+
+      while (failedKeys.length > 0 && retryCount < 2) {
+        retryCount++;
+        await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+
+        const retryCmd: Record<string, string> = {};
+        failedKeys.forEach(k => {
+          const call = commands[k];
+          const qs = serializeBitrixParams(call.params || {});
+          retryCmd[k] = `${call.method}${qs ? '?' + qs : ''}`;
+        });
+
+        try {
+          const retryResponse = await this.request<BitrixBatchResponse>('post', 'batch', { halt: 0, cmd: retryCmd });
+          const retryResData = retryResponse.result?.result || {};
+          const retryErrData = retryResponse.result?.result_error || {};
+
+          failedKeys.forEach(k => {
+            if (!retryErrData[k] && retryResData[k] !== undefined) {
+              combinedResult[k] = retryResData[k];
+              delete combinedErrors[k];
+            } else if (retryErrData[k]) {
+              combinedErrors[k] = retryErrData[k];
+            }
+          });
+        } catch {
+          // Keep existing failure if retry request failed
+        }
+        failedKeys = batchKeys.filter(k => combinedErrors[k]);
+      }
+    }
+
+    return { result: combinedResult, errors: combinedErrors };
   }
 
   async testConnection(portalUrl: string): Promise<boolean> {

@@ -86,7 +86,12 @@ export interface BitrixApiResponse<T = any> {
 }
 
 export interface BitrixBatchResponse<T = any> {
-  result: T[];
+  result: {
+    result?: Record<string, T>;
+    result_error?: Record<string, any>;
+    result_total?: Record<string, number>;
+    result_next?: Record<string, number>;
+  };
   time: {
     start: string;
     finish: string;

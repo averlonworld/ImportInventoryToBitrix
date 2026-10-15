@@ -415,6 +415,265 @@ export class BitrixProductService {
     this.context = context;
   }
 
+  async batchFindProductsByCodes(codes: string[]): Promise<Map<string, any>> {
+    const map = new Map<string, any>();
+    const cleanCodes = Array.from(new Set(codes.map(c => String(c || '').trim()).filter(Boolean)));
+    if (cleanCodes.length === 0) return map;
+
+    const barcodeProp = this.context.barcodePropertyId ? `property${this.context.barcodePropertyId}` : undefined;
+    const select = ['id', 'iblockId', 'name', 'code', 'quantity', 'purchasingPrice'];
+    if (barcodeProp) select.push(barcodeProp);
+
+    const CHUNK_SIZE = 50;
+    for (let i = 0; i < cleanCodes.length; i += CHUNK_SIZE) {
+      const chunk = cleanCodes.slice(i, i + CHUNK_SIZE);
+      try {
+        const result = await this.client.callMethod('catalog.product.list', {
+          select,
+          filter: { iblockId: this.context.catalogId, '=code': chunk },
+        });
+        const products = (result && result.products) || [];
+        for (const p of products) {
+          let barcode = p.barcode;
+          if (!barcode && barcodeProp && p[barcodeProp]) {
+            barcode = typeof p[barcodeProp] === 'object' ? p[barcodeProp].value : p[barcodeProp];
+          }
+          if (!barcode && this.context.barcodePropertyId) {
+            const rawProp = p[`property${this.context.barcodePropertyId}`] || p[`PROPERTY_${this.context.barcodePropertyId}`];
+            if (rawProp) {
+              barcode = typeof rawProp === 'object' ? rawProp.value : rawProp;
+            }
+          }
+          const enriched = { ...p, barcode };
+          if (p.code) {
+            map.set(String(p.code).trim().toUpperCase(), enriched);
+          }
+        }
+      } catch (err: any) {
+        logger.warn({ err: err?.message, chunkCount: chunk.length }, 'Failed to batch lookup products by codes');
+      }
+    }
+    return map;
+  }
+
+  buildCatalogProductFields(input: InventoryProductInput, isNew = false): any {
+    const partNum = (input.partNumber || '').trim();
+    const codeVal = (input.code || '').trim();
+    const descVal = (input.description || '').trim();
+    const displayName = partNum || codeVal;
+    const partNumVal = partNum || codeVal;
+
+    const fields: any = { active: 'Y' };
+    if (isNew) {
+      fields.iblockId = this.context.catalogId;
+      fields.barcodeMulti = 'N';
+    }
+
+    if (displayName) fields.name = displayName;
+    if (codeVal) fields.code = codeVal;
+    if (descVal) {
+      fields.previewText = descVal;
+      fields.detailText = descVal;
+      fields.previewTextType = 'text';
+      fields.detailTextType = 'text';
+    }
+
+    this.context.partNumberPropertyIds?.forEach(propId => {
+      fields[`property${propId}`] = { value: partNumVal };
+    });
+    this.context.itemCodePropertyIds?.forEach(propId => {
+      fields[`property${propId}`] = { value: codeVal };
+    });
+    if (input.barcode && this.context.barcodePropertyId) {
+      fields[`property${this.context.barcodePropertyId}`] = { value: input.barcode.trim() };
+    }
+    if (input.cost !== undefined && input.cost !== null && !isNaN(Number(input.cost))) {
+      fields.purchasingPrice = Number(input.cost);
+      fields.purchasingCurrency = this.context.currency;
+      this.context.costPropertyIds?.forEach(propId => {
+        fields[`property${propId}`] = { value: String(input.cost) };
+      });
+    }
+    if (input.qtyInStock !== undefined && input.qtyInStock !== null && !isNaN(Number(input.qtyInStock))) {
+      fields.quantity = Number(input.qtyInStock);
+      this.context.stockQtyPropertyIds?.forEach(propId => {
+        fields[`property${propId}`] = { value: String(input.qtyInStock) };
+      });
+    }
+    if (input.qtyOnOrder !== undefined && input.qtyOnOrder !== null && !isNaN(Number(input.qtyOnOrder))) {
+      fields.quantityReserved = Number(input.qtyOnOrder);
+      this.context.qtyOnOrderPropertyIds?.forEach(propId => {
+        fields[`property${propId}`] = { value: Number(input.qtyOnOrder) };
+      });
+    }
+    if (input.dealerPrice !== undefined && input.dealerPrice !== null && !isNaN(Number(input.dealerPrice))) {
+      this.context.dealerPricePropertyIds?.forEach(propId => {
+        fields[`property${propId}`] = { value: String(input.dealerPrice) };
+      });
+    }
+    if (input.endUserPrice !== undefined && input.endUserPrice !== null && !isNaN(Number(input.endUserPrice))) {
+      this.context.endUserPricePropertyIds?.forEach(propId => {
+        fields[`property${propId}`] = { value: String(input.endUserPrice) };
+      });
+    }
+    return fields;
+  }
+
+  async batchCreateOrUpdateProducts(
+    items: Array<{
+      key: string;
+      code: string;
+      existingProductId?: number;
+      input: InventoryProductInput;
+    }>
+  ): Promise<Map<string, { id: number; actionTaken: 'CREATED' | 'UPDATED'; error?: string }>> {
+    const resultMap = new Map<string, { id: number; actionTaken: 'CREATED' | 'UPDATED'; error?: string }>();
+    if (items.length === 0) return resultMap;
+
+    const CHUNK_SIZE = 50;
+    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+      const chunk = items.slice(i, i + CHUNK_SIZE);
+      const cmds: Record<string, { method: string; params?: any }> = {};
+
+      chunk.forEach(item => {
+        if (item.existingProductId) {
+          cmds[item.key] = {
+            method: 'catalog.product.update',
+            params: {
+              id: Number(item.existingProductId),
+              fields: this.buildCatalogProductFields(item.input, false),
+            },
+          };
+        } else {
+          cmds[item.key] = {
+            method: 'catalog.product.add',
+            params: {
+              fields: this.buildCatalogProductFields(item.input, true),
+            },
+          };
+        }
+      });
+
+      const batchRes = await this.client.batchNamed(cmds);
+
+      for (const item of chunk) {
+        if (batchRes.errors[item.key]) {
+          const errObj = batchRes.errors[item.key];
+          const errMsg = errObj?.error_description || errObj?.error || 'Bitrix error in batch update';
+          resultMap.set(item.key, {
+            id: item.existingProductId || 0,
+            actionTaken: item.existingProductId ? 'UPDATED' : 'CREATED',
+            error: errMsg,
+          });
+        } else {
+          const data = batchRes.result[item.key];
+          const newId = item.existingProductId
+            ? Number(item.existingProductId)
+            : Number(data?.element?.id || data?.product?.id || data?.id || 0);
+
+          resultMap.set(item.key, {
+            id: newId,
+            actionTaken: item.existingProductId ? 'UPDATED' : 'CREATED',
+          });
+        }
+      }
+    }
+
+    return resultMap;
+  }
+
+  async batchSyncPrices(
+    items: Array<{
+      productId: number;
+      cost?: number;
+      dealerPrice?: number;
+      endUserPrice?: number;
+    }>
+  ): Promise<void> {
+    const valid = items.filter(it => it.productId > 0 && (it.dealerPrice !== undefined || it.endUserPrice !== undefined || it.cost !== undefined));
+    if (valid.length === 0) return;
+
+    const pids = Array.from(new Set(valid.map(it => it.productId)));
+    const existingPricesMap = new Map<string, number>();
+
+    const CHUNK_SIZE = 50;
+    for (let i = 0; i < pids.length; i += CHUNK_SIZE) {
+      const chunkPids = pids.slice(i, i + CHUNK_SIZE);
+      try {
+        const listRes = await this.client.callMethod('catalog.price.list', {
+          filter: { '=productId': chunkPids },
+        });
+        const prices = (listRes && listRes.prices) || [];
+        for (const p of prices) {
+          if (p.productId && p.catalogGroupId && p.id) {
+            existingPricesMap.set(`${p.productId}_${p.catalogGroupId}`, Number(p.id));
+          }
+        }
+      } catch (err: any) {
+        logger.warn({ err: err?.message }, 'Failed to query prices for batch');
+      }
+    }
+
+    const priceCmds: Record<string, { method: string; params?: any }> = {};
+
+    valid.forEach(it => {
+      const pid = it.productId;
+      const basePrice = it.endUserPrice ?? it.dealerPrice;
+
+      if (basePrice !== undefined && !isNaN(Number(basePrice))) {
+        const baseKey = `${pid}_${this.context.basePriceTypeId}`;
+        const existingId = existingPricesMap.get(baseKey);
+        if (existingId) {
+          priceCmds[`bp_${pid}`] = {
+            method: 'catalog.price.update',
+            params: { id: existingId, fields: { price: Number(basePrice), currency: this.context.currency } },
+          };
+        } else {
+          priceCmds[`bp_${pid}`] = {
+            method: 'catalog.price.add',
+            params: { fields: { productId: pid, catalogGroupId: this.context.basePriceTypeId, price: Number(basePrice), currency: this.context.currency } },
+          };
+        }
+      }
+
+      if (this.context.dealerPriceTypeId && it.dealerPrice !== undefined && !isNaN(Number(it.dealerPrice))) {
+        const dKey = `${pid}_${this.context.dealerPriceTypeId}`;
+        const existingId = existingPricesMap.get(dKey);
+        if (existingId) {
+          priceCmds[`dp_${pid}`] = {
+            method: 'catalog.price.update',
+            params: { id: existingId, fields: { price: Number(it.dealerPrice), currency: this.context.currency } },
+          };
+        } else {
+          priceCmds[`dp_${pid}`] = {
+            method: 'catalog.price.add',
+            params: { fields: { productId: pid, catalogGroupId: this.context.dealerPriceTypeId, price: Number(it.dealerPrice), currency: this.context.currency } },
+          };
+        }
+      }
+
+      if (this.context.endUserPriceTypeId && it.endUserPrice !== undefined && !isNaN(Number(it.endUserPrice))) {
+        const euKey = `${pid}_${this.context.endUserPriceTypeId}`;
+        const existingId = existingPricesMap.get(euKey);
+        if (existingId) {
+          priceCmds[`eup_${pid}`] = {
+            method: 'catalog.price.update',
+            params: { id: existingId, fields: { price: Number(it.endUserPrice), currency: this.context.currency } },
+          };
+        } else {
+          priceCmds[`eup_${pid}`] = {
+            method: 'catalog.price.add',
+            params: { fields: { productId: pid, catalogGroupId: this.context.endUserPriceTypeId, price: Number(it.endUserPrice), currency: this.context.currency } },
+          };
+        }
+      }
+    });
+
+    if (Object.keys(priceCmds).length > 0) {
+      await this.client.batchNamed(priceCmds);
+    }
+  }
+
   async findProductBySku(sku: string): Promise<any | null> {
     try {
       const barcodeProp = this.context.barcodePropertyId ? `property${this.context.barcodePropertyId}` : undefined;

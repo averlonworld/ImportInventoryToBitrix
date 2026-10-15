@@ -209,8 +209,13 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
         const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
         const stockReceiptService = new BitrixStockReceiptService(client);
         storesList = await stockReceiptService.getStores();
+        const mainStore = storesList.find(s => s.title.toLowerCase().includes('main') || s.id === 62) || storesList[0];
+        const targetStoreId = effectiveMapping.defaultStoreId ? Number(effectiveMapping.defaultStoreId) : (mainStore ? mainStore.id : 1);
+        const preloaded = await stockReceiptService.preloadWarehouseStock(targetStoreId);
+        preloaded.forEach((v, k) => plannedStockMap.set(k, v));
+        logger.info(`Preloaded ${plannedStockMap.size} warehouse stock items for store ${targetStoreId}`);
       } catch (err: any) {
-        logger.warn({ err: err?.message }, 'Failed to fetch stores list; defaulting to primary store');
+        logger.warn({ err: err?.message }, 'Failed to fetch stores list or preload warehouse stock; defaulting to primary store');
       }
     }
 
@@ -293,14 +298,19 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
 
       logger.info(`Processing batch of ${pendingRecords.length} records`);
 
-      // Process each record asynchronously with controlled concurrency
-      const concurrency = bitrixConfig.concurrency || 5;
+      if (hasInventoryStock) {
+        // High-performance batched stock receipt processing (50 items per batch)
+        const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
 
-      const worker = async (record: any): Promise<void> => {
-        try {
+        // 1. Mark entire chunk as PROCESSING
+        await prisma.importRecord.updateMany({
+          where: { id: { in: pendingRecords.map(r => r.id) } },
+          data: { status: 'PROCESSING' },
+        });
+
+        // 2. Track duplicate items
+        for (const record of pendingRecords) {
           const rowData = extractRowData(record, effectiveMapping, importType);
-
-          // Track duplicate rows within this import file (Requirement 2 & 8)
           const itemCode = (rowData.code || rowData.sku || record.sku || '').trim().toUpperCase();
           if (itemCode) {
             if (seenCodes.has(itemCode)) {
@@ -312,19 +322,42 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
               seenCodes.add(itemCode);
             }
           }
+        }
 
-          // Mark as processing
-          await prisma.importRecord.update({
-            where: { id: record.id },
-            data: { status: 'PROCESSING' },
-          });
+        // 3. Process the entire batch in fast Bitrix batch operations
+        const batchInputs = pendingRecords.map(record => ({
+          recordId: record.id,
+          rowData: extractRowData(record, effectiveMapping, importType),
+        }));
 
-          const result = hasInventoryStock
-            ? await stockReceiptImportService.processRecord(rowData, effectiveMapping, importMode, stockAdjustmentContext, storesList, importJob.createdById || undefined)
-            : importType === 'INVOICES'
-              ? await invoiceImportService.processInvoiceRecord(rowData, effectiveMapping, importMode, importJob.createdById || undefined)
-              : await importService.processRecord(rowData, effectiveMapping, importMode, importJob.createdById || undefined);
+        let batchResults = new Map<string, any>();
+        try {
+          batchResults = await stockReceiptImportService.processBatch(
+            batchInputs,
+            effectiveMapping,
+            importMode,
+            stockAdjustmentContext,
+            storesList,
+            client
+          );
+        } catch (batchErr: any) {
+          logger.error({ err: batchErr }, 'stockReceiptImportService.processBatch unexpected error');
+        }
 
+        // 4. Update records and job counters
+        let batchProcessed = 0;
+        let batchSuccess = 0;
+        let batchFailed = 0;
+        let batchSkipped = 0;
+        let batchCreated = 0;
+        let batchUpdated = 0;
+
+        for (const record of pendingRecords) {
+          const rowData = extractRowData(record, effectiveMapping, importType);
+          const result = batchResults.get(record.id) || {
+            status: 'FAILED' as const,
+            errorMessage: 'Batch processing returned no result for record',
+          };
           const rec = result as any;
 
           await prisma.importRecord.update({
@@ -350,21 +383,15 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
             },
           });
 
-          // Update job progress counters
-          await prisma.importJob.update({
-            where: { id: importJobId },
-            data: {
-              processedRows: { increment: 1 },
-              successfulRows: { increment: result.status === 'SUCCESS' ? 1 : 0 },
-              failedRows: { increment: (result.status === 'FAILED' || result.status === 'PARTIAL_FAILURE') ? 1 : 0 },
-              skippedRows: { increment: result.status === 'SKIPPED' ? 1 : 0 },
-              createdProductsCount: { increment: rec.actionTaken === 'CREATED' ? 1 : 0 },
-              updatedProductsCount: { increment: rec.actionTaken === 'UPDATED' ? 1 : 0 },
-            },
-          });
+          batchProcessed++;
+          if (result.status === 'SUCCESS') batchSuccess++;
+          else if (result.status === 'FAILED' || result.status === 'PARTIAL_FAILURE') batchFailed++;
+          else if (result.status === 'SKIPPED') batchSkipped++;
 
-          const key = importType === 'INVOICES' ? rowData.accountNumber || record.sku : record.sku;
+          if (rec.actionTaken === 'CREATED') batchCreated++;
+          else if (rec.actionTaken === 'UPDATED') batchUpdated++;
 
+          const key = rowData.code || rowData.sku || record.sku;
           if (result.status === 'FAILED' || result.status === 'PARTIAL_FAILURE') {
             debugLog.warn('WORKER', `Record row ${record.rowNumber} (${key}): ${result.status}`, {
               importJobId,
@@ -374,40 +401,135 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
               bitrixError: result.bitrixError,
             });
           }
-
           logger.info(`Processed record ${key} (row ${record.rowNumber}): ${result.status}`);
-        } catch (error) {
-          logger.error({ err: error }, `Failed to process record ${record.id}`);
-          const errMessage = error instanceof Error ? error.message : 'Unknown error';
-
-          debugLog.error('WORKER', `Unexpected error on record row ${record.rowNumber}: ${errMessage}`, {
-            importJobId,
-            rowNumber: record.rowNumber,
-            recordId: record.id,
-          });
-
-          await prisma.importRecord.update({
-            where: { id: record.id },
-            data: {
-              status: 'FAILED',
-              errorMessage: errMessage,
-            },
-          });
-
-          await prisma.importJob.update({
-            where: { id: importJobId },
-            data: {
-              processedRows: { increment: 1 },
-              failedRows: { increment: 1 },
-            },
-          });
         }
-      };
 
-      // Process with concurrency control
-      for (let i = 0; i < pendingRecords.length; i += concurrency) {
-        const chunk = pendingRecords.slice(i, i + concurrency);
-        await Promise.all(chunk.map(worker));
+        await prisma.importJob.update({
+          where: { id: importJobId },
+          data: {
+            processedRows: { increment: batchProcessed },
+            successfulRows: { increment: batchSuccess },
+            failedRows: { increment: batchFailed },
+            skippedRows: { increment: batchSkipped },
+            createdProductsCount: { increment: batchCreated },
+            updatedProductsCount: { increment: batchUpdated },
+          },
+        });
+      } else {
+        // Process each record asynchronously with controlled concurrency (Invoices or standard products)
+        const concurrency = bitrixConfig.concurrency || 5;
+
+        const worker = async (record: any): Promise<void> => {
+          try {
+            const rowData = extractRowData(record, effectiveMapping, importType);
+
+            // Track duplicate rows within this import file (Requirement 2 & 8)
+            const itemCode = (rowData.code || rowData.sku || record.sku || '').trim().toUpperCase();
+            if (itemCode) {
+              if (seenCodes.has(itemCode)) {
+                await prisma.importJob.update({
+                  where: { id: importJobId },
+                  data: { duplicateRows: { increment: 1 } },
+                });
+              } else {
+                seenCodes.add(itemCode);
+              }
+            }
+
+            // Mark as processing
+            await prisma.importRecord.update({
+              where: { id: record.id },
+              data: { status: 'PROCESSING' },
+            });
+
+            const result = importType === 'INVOICES'
+              ? await invoiceImportService.processInvoiceRecord(rowData, effectiveMapping, importMode, importJob.createdById || undefined)
+              : await importService.processRecord(rowData, effectiveMapping, importMode, importJob.createdById || undefined);
+
+            const rec = result as any;
+
+            await prisma.importRecord.update({
+              where: { id: record.id },
+              data: {
+                status: result.status,
+                ...(rec.actionTaken ? { actionTaken: rec.actionTaken } : {}),
+                ...(rowData.partNumber ? { partNumber: rowData.partNumber } : {}),
+                ...(rowData.description ? { description: rowData.description } : {}),
+                ...(rowData.cost !== undefined ? { cost: rowData.cost } : {}),
+                ...(rowData.dealerPrice !== undefined ? { dealerPrice: rowData.dealerPrice } : {}),
+                ...(rowData.endUserPrice !== undefined ? { endUserPrice: rowData.endUserPrice } : {}),
+                ...(rowData.qtyOnOrder !== undefined ? { qtyOnOrder: rowData.qtyOnOrder } : {}),
+                ...(rowData.qtyInStock !== undefined ? { qtyInStock: rowData.qtyInStock } : {}),
+                ...(rec.bitrixProductId ? { bitrixProductId: rec.bitrixProductId } : {}),
+                ...(rec.bitrixDocumentId ? { bitrixDocumentId: rec.bitrixDocumentId } : {}),
+                ...(rec.warehouseId !== undefined ? { warehouseId: rec.warehouseId } : {}),
+                ...(rec.quantityArrived !== undefined ? { quantityArrived: rec.quantityArrived } : {}),
+                ...(rec.purchasePrice !== undefined ? { purchasePrice: rec.purchasePrice } : {}),
+                ...(rec.salesPrice !== undefined ? { salesPrice: rec.salesPrice } : {}),
+                ...(result.errorMessage ? { errorMessage: result.errorMessage, errorType: classifyError(result.errorMessage) } : {}),
+                ...(result.bitrixError ? { bitrixError: result.bitrixError } : {}),
+              },
+            });
+
+            // Update job progress counters
+            await prisma.importJob.update({
+              where: { id: importJobId },
+              data: {
+                processedRows: { increment: 1 },
+                successfulRows: { increment: result.status === 'SUCCESS' ? 1 : 0 },
+                failedRows: { increment: (result.status === 'FAILED' || result.status === 'PARTIAL_FAILURE') ? 1 : 0 },
+                skippedRows: { increment: result.status === 'SKIPPED' ? 1 : 0 },
+                createdProductsCount: { increment: rec.actionTaken === 'CREATED' ? 1 : 0 },
+                updatedProductsCount: { increment: rec.actionTaken === 'UPDATED' ? 1 : 0 },
+              },
+            });
+
+            const key = importType === 'INVOICES' ? rowData.accountNumber || record.sku : record.sku;
+
+            if (result.status === 'FAILED' || result.status === 'PARTIAL_FAILURE') {
+              debugLog.warn('WORKER', `Record row ${record.rowNumber} (${key}): ${result.status}`, {
+                importJobId,
+                rowNumber: record.rowNumber,
+                key,
+                errorMessage: result.errorMessage,
+                bitrixError: result.bitrixError,
+              });
+            }
+
+            logger.info(`Processed record ${key} (row ${record.rowNumber}): ${result.status}`);
+          } catch (error) {
+            logger.error({ err: error }, `Failed to process record ${record.id}`);
+            const errMessage = error instanceof Error ? error.message : 'Unknown error';
+
+            debugLog.error('WORKER', `Unexpected error on record row ${record.rowNumber}: ${errMessage}`, {
+              importJobId,
+              rowNumber: record.rowNumber,
+              recordId: record.id,
+            });
+
+            await prisma.importRecord.update({
+              where: { id: record.id },
+              data: {
+                status: 'FAILED',
+                errorMessage: errMessage,
+              },
+            });
+
+            await prisma.importJob.update({
+              where: { id: importJobId },
+              data: {
+                processedRows: { increment: 1 },
+                failedRows: { increment: 1 },
+              },
+            });
+          }
+        };
+
+        // Process with concurrency control
+        for (let i = 0; i < pendingRecords.length; i += concurrency) {
+          const chunk = pendingRecords.slice(i, i + concurrency);
+          await Promise.all(chunk.map(worker));
+        }
       }
 
       // Keep BullMQ job alive and update real-time progress in Redis
@@ -431,6 +553,7 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
       data: {
         status: 'FAILED',
         errorMessage: 'Worker interrupted before this record was processed. Use Retry to continue.',
+        errorType: 'PROCESSING_ERROR',
       },
     });
 
@@ -439,6 +562,186 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
         where: { id: importJobId },
         data: { failedRows: { increment: stuck.count }, processedRows: { increment: stuck.count } },
       });
+    }
+
+    // ========================================================
+    // TIER 2: AUTOMATIC RETRY ENGINE (For Transient Failures)
+    // Automatically retries records that failed due to network,
+    // rate limits, or transient Bitrix API errors (excluding
+    // non-recoverable VALIDATION_ERRORs).
+    // ========================================================
+    const MAX_AUTO_RETRIES = 3;
+    let autoRetryAttempt = 0;
+
+    while (autoRetryAttempt < MAX_AUTO_RETRIES) {
+      const failedRecordsToRetry = await prisma.importRecord.findMany({
+        where: {
+          importJobId,
+          status: { in: ['FAILED', 'PARTIAL_FAILURE'] },
+          retryCount: { lt: MAX_AUTO_RETRIES },
+          NOT: {
+            errorType: 'VALIDATION_ERROR',
+          },
+        },
+        orderBy: { rowNumber: 'asc' },
+      });
+
+      if (failedRecordsToRetry.length === 0) {
+        break;
+      }
+
+      autoRetryAttempt++;
+      const backoffMs = autoRetryAttempt * 2000;
+      logger.info(`[Auto-Retry] Pass ${autoRetryAttempt}/${MAX_AUTO_RETRIES} starting for ${failedRecordsToRetry.length} failed record(s) in job ${importJobId} (delay: ${backoffMs}ms)...`);
+      debugLog.info('WORKER', `Auto-retry pass ${autoRetryAttempt}/${MAX_AUTO_RETRIES} starting for ${failedRecordsToRetry.length} record(s)`, {
+        importJobId,
+        autoRetryAttempt,
+        failedCount: failedRecordsToRetry.length,
+        backoffMs,
+      });
+
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+
+      if (hasInventoryStock) {
+        const client = await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
+
+        for (let i = 0; i < failedRecordsToRetry.length; i += BATCH_SIZE) {
+          const chunk = failedRecordsToRetry.slice(i, i + BATCH_SIZE);
+
+          // Mark chunk as PROCESSING and increment retryCount
+          await prisma.importRecord.updateMany({
+            where: { id: { in: chunk.map(r => r.id) } },
+            data: {
+              status: 'PROCESSING',
+              retryCount: { increment: 1 },
+            },
+          });
+
+          const batchInputs = chunk.map(record => ({
+            recordId: record.id,
+            rowData: extractRowData(record, effectiveMapping, importType),
+          }));
+
+          let batchResults = new Map<string, any>();
+          try {
+            batchResults = await stockReceiptImportService.processBatch(
+              batchInputs,
+              effectiveMapping,
+              importMode,
+              stockAdjustmentContext,
+              storesList,
+              client
+            );
+          } catch (retryErr: any) {
+            logger.error({ err: retryErr }, `[Auto-Retry] processBatch failed on pass ${autoRetryAttempt}`);
+          }
+
+          for (const record of chunk) {
+            const rowData = extractRowData(record, effectiveMapping, importType);
+            const result = batchResults.get(record.id) || {
+              status: 'FAILED' as const,
+              errorMessage: `Auto-retry attempt ${autoRetryAttempt} failed to return a result`,
+            };
+            const rec = result as any;
+
+            await prisma.importRecord.update({
+              where: { id: record.id },
+              data: {
+                status: result.status,
+                ...(rec.actionTaken ? { actionTaken: rec.actionTaken } : {}),
+                ...(rowData.partNumber ? { partNumber: rowData.partNumber } : {}),
+                ...(rowData.description ? { description: rowData.description } : {}),
+                ...(rowData.cost !== undefined ? { cost: rowData.cost } : {}),
+                ...(rowData.dealerPrice !== undefined ? { dealerPrice: rowData.dealerPrice } : {}),
+                ...(rowData.endUserPrice !== undefined ? { endUserPrice: rowData.endUserPrice } : {}),
+                ...(rowData.qtyOnOrder !== undefined ? { qtyOnOrder: rowData.qtyOnOrder } : {}),
+                ...(rowData.qtyInStock !== undefined ? { qtyInStock: rowData.qtyInStock } : {}),
+                ...(rec.bitrixProductId ? { bitrixProductId: rec.bitrixProductId } : {}),
+                ...(rec.bitrixDocumentId ? { bitrixDocumentId: rec.bitrixDocumentId } : {}),
+                ...(rec.warehouseId !== undefined ? { warehouseId: rec.warehouseId } : {}),
+                ...(rec.quantityArrived !== undefined ? { quantityArrived: rec.quantityArrived } : {}),
+                ...(rec.purchasePrice !== undefined ? { purchasePrice: rec.purchasePrice } : {}),
+                ...(rec.salesPrice !== undefined ? { salesPrice: rec.salesPrice } : {}),
+                ...(result.errorMessage ? { errorMessage: result.errorMessage, errorType: classifyError(result.errorMessage) } : { errorMessage: null, errorType: null }),
+                ...(result.bitrixError ? { bitrixError: result.bitrixError } : { bitrixError: null }),
+              },
+            });
+
+            if (result.status === 'SUCCESS') {
+              logger.info(`[Auto-Retry] Record row ${record.rowNumber} (${record.sku}) recovered successfully on attempt ${autoRetryAttempt}`);
+              debugLog.info('WORKER', `Record row ${record.rowNumber} (${record.sku}) recovered on auto-retry ${autoRetryAttempt}`, {
+                importJobId,
+                rowNumber: record.rowNumber,
+                sku: record.sku,
+                attempt: autoRetryAttempt,
+              });
+            } else {
+              logger.warn(`[Auto-Retry] Record row ${record.rowNumber} (${record.sku}) failed again on attempt ${autoRetryAttempt}: ${result.errorMessage}`);
+            }
+          }
+        }
+      } else {
+        const concurrency = bitrixConfig.concurrency || 5;
+        const retryWorker = async (record: any): Promise<void> => {
+          try {
+            await prisma.importRecord.update({
+              where: { id: record.id },
+              data: {
+                status: 'PROCESSING',
+                retryCount: { increment: 1 },
+              },
+            });
+
+            const rowData = extractRowData(record, effectiveMapping, importType);
+            const result = importType === 'INVOICES'
+              ? await invoiceImportService.processInvoiceRecord(rowData, effectiveMapping, importMode, importJob.createdById || undefined)
+              : await importService.processRecord(rowData, effectiveMapping, importMode, importJob.createdById || undefined);
+
+            const rec = result as any;
+            await prisma.importRecord.update({
+              where: { id: record.id },
+              data: {
+                status: result.status,
+                ...(rec.actionTaken ? { actionTaken: rec.actionTaken } : {}),
+                ...(rowData.partNumber ? { partNumber: rowData.partNumber } : {}),
+                ...(rowData.description ? { description: rowData.description } : {}),
+                ...(rowData.cost !== undefined ? { cost: rowData.cost } : {}),
+                ...(rowData.dealerPrice !== undefined ? { dealerPrice: rowData.dealerPrice } : {}),
+                ...(rowData.endUserPrice !== undefined ? { endUserPrice: rowData.endUserPrice } : {}),
+                ...(rowData.qtyOnOrder !== undefined ? { qtyOnOrder: rowData.qtyOnOrder } : {}),
+                ...(rowData.qtyInStock !== undefined ? { qtyInStock: rowData.qtyInStock } : {}),
+                ...(rec.bitrixProductId ? { bitrixProductId: rec.bitrixProductId } : {}),
+                ...(rec.bitrixDocumentId ? { bitrixDocumentId: rec.bitrixDocumentId } : {}),
+                ...(rec.warehouseId !== undefined ? { warehouseId: rec.warehouseId } : {}),
+                ...(rec.quantityArrived !== undefined ? { quantityArrived: rec.quantityArrived } : {}),
+                ...(rec.purchasePrice !== undefined ? { purchasePrice: rec.purchasePrice } : {}),
+                ...(rec.salesPrice !== undefined ? { salesPrice: rec.salesPrice } : {}),
+                ...(result.errorMessage ? { errorMessage: result.errorMessage, errorType: classifyError(result.errorMessage) } : { errorMessage: null, errorType: null }),
+                ...(result.bitrixError ? { bitrixError: result.bitrixError } : { bitrixError: null }),
+              },
+            });
+
+            if (result.status === 'SUCCESS') {
+              logger.info(`[Auto-Retry] Record row ${record.rowNumber} (${record.sku}) recovered successfully on attempt ${autoRetryAttempt}`);
+            }
+          } catch (retryErr: any) {
+            const errMessage = retryErr instanceof Error ? retryErr.message : 'Unknown retry error';
+            await prisma.importRecord.update({
+              where: { id: record.id },
+              data: {
+                status: 'FAILED',
+                errorMessage: errMessage,
+                errorType: classifyError(errMessage),
+              },
+            });
+          }
+        };
+
+        for (let i = 0; i < failedRecordsToRetry.length; i += concurrency) {
+          const chunk = failedRecordsToRetry.slice(i, i + concurrency);
+          await Promise.all(chunk.map(retryWorker));
+        }
+      }
     }
 
     // Conduct stock adjustment documents in Bitrix24 if applicable
