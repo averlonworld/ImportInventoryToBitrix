@@ -530,7 +530,9 @@ export default function StockReceiptImport() {
                       Est. time: {estimateTotalDuration(preview.totalRows)}
                     </span>
                   </div>
-                  <span className="text-xs text-gray-500">Showing first {preview.rows.length} rows</span>
+                  <span className="text-xs font-medium text-blue-700 bg-blue-50 px-2.5 py-0.5 rounded-full border border-blue-200">
+                    All {preview.totalRows.toLocaleString()} rows loaded
+                  </span>
                 </div>
                 <DataPreview preview={preview} />
               </div>

@@ -64,12 +64,15 @@ export class ImportController {
       const fileSize = fs.statSync(resolvedPath).size;
       const data = await excelService.parseFile(resolvedPath, fileName, fileSize);
 
-      // Return preview data (first 50 rows)
+      // Return preview data with all rows so client can paginate through the entire dataset
+      const limit = req.body.limit ? Number(req.body.limit) : undefined;
+      const rows = limit && limit > 0 ? data.rows.slice(0, limit) : data.rows;
+
       res.json({
         success: true,
         data: {
           ...data,
-          rows: data.rows.slice(0, 50),
+          rows,
           totalRows: data.totalRows,
         },
       });
