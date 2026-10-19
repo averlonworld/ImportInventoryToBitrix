@@ -133,10 +133,10 @@ export class BitrixStockReceiptService {
             resolvedCurrency = baseCurrency.CURRENCY;
           }
         } catch {
-          resolvedCurrency = 'AED';
+          resolvedCurrency = 'INR';
         }
       }
-      if (!resolvedCurrency) resolvedCurrency = 'AED';
+      if (!resolvedCurrency) resolvedCurrency = 'INR';
 
       const now = new Date();
       const docNum = `DOC-${docType}-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${Date.now().toString().slice(-4)}`;

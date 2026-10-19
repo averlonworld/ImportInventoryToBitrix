@@ -94,7 +94,7 @@ export class BitrixController {
             stockReceiptFields: STOCK_RECEIPT_CORE_FIELDS,
             catalogFields: [],
             stores: [],
-            currency: 'USD',
+            currency: 'INR',
             configured: false,
           },
         });

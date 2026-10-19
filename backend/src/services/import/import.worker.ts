@@ -789,6 +789,23 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
               logger.error(errStr);
               debugLog.error('WORKER', errStr);
               conductionError = conductRes.error || errStr;
+
+              // Propagate conduction error to affected records so they reflect FAILED instead of false SUCCESS
+              await prisma.importRecord.updateMany({
+                where: {
+                  importJobId,
+                  status: 'SUCCESS',
+                  OR: [
+                    { bitrixDocumentId: String(docId) },
+                    { bitrixDocumentId: null },
+                  ],
+                },
+                data: {
+                  status: 'FAILED',
+                  errorMessage: `Bitrix inventory document #${docId} conduction failed: ${conductionError}`,
+                  errorType: 'BITRIX_API_ERROR',
+                },
+              });
             }
           } else {
             // Delete unused draft document
@@ -812,6 +829,19 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
       } catch (err: any) {
         logger.error({ err }, 'Error during stock adjustment document conduction');
         conductionError = err.message || 'Stock document conduction error';
+
+        // Propagate general conduction failure to records that were still marked SUCCESS
+        await prisma.importRecord.updateMany({
+          where: {
+            importJobId,
+            status: 'SUCCESS',
+          },
+          data: {
+            status: 'FAILED',
+            errorMessage: `Stock adjustment conduction failed: ${conductionError}`,
+            errorType: 'BITRIX_API_ERROR',
+          },
+        });
       }
     }
 
@@ -826,8 +856,8 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
     ]);
 
     let finalStatus = 'COMPLETED';
-    if (failedCount > 0 || partialCount > 0 || conductionError) {
-      finalStatus = 'COMPLETED_WITH_ERRORS';
+    if (failedCount > 0 && successCount === 0 && partialCount === 0) {
+      finalStatus = 'FAILED';
     }
 
     await prisma.importJob.update({

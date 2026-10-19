@@ -307,7 +307,8 @@ export class StockReceiptImportService {
         }
       }
 
-      const status: StockReceiptResultStatus = partialNotes.length > 0 ? 'PARTIAL_FAILURE' : 'SUCCESS';
+      const hasError = partialNotes.length > 0;
+      const status: StockReceiptResultStatus = hasError ? 'FAILED' : 'SUCCESS';
 
       return {
         status,
@@ -322,7 +323,7 @@ export class StockReceiptImportService {
         dealerPrice: dealerPrice !== undefined ? Number(dealerPrice) : undefined,
         endUserPrice: endUserPrice !== undefined ? Number(endUserPrice) : undefined,
         qtyOnOrder: qtyOnOrder !== undefined ? Number(qtyOnOrder) : undefined,
-        errorMessage: partialNotes.length > 0 ? partialNotes.join('; ') : undefined,
+        errorMessage: hasError ? partialNotes.join('; ') : undefined,
       };
     } catch (error: any) {
       logger.error({ err: error, code, partNumber }, 'Stock receipt record processing failed');
@@ -605,9 +606,30 @@ export class StockReceiptImportService {
               }
             }
           });
+        } else {
+          for (const el of receiptElements) {
+            const matchedItem = itemsToProcess.find(it => {
+              const info = itemAdjustmentInfo.get(it.recordId);
+              return info && info.productId === el.productId;
+            });
+            if (matchedItem) {
+              const info = itemAdjustmentInfo.get(matchedItem.recordId);
+              if (info) info.partialNotes.push('Failed to create or obtain stock receipt document in Bitrix');
+            }
+          }
         }
       } catch (err: any) {
         logger.warn({ err: err?.message }, 'Failed to batch add receipt elements');
+        for (const el of receiptElements) {
+          const matchedItem = itemsToProcess.find(it => {
+            const info = itemAdjustmentInfo.get(it.recordId);
+            return info && info.productId === el.productId;
+          });
+          if (matchedItem) {
+            const info = itemAdjustmentInfo.get(matchedItem.recordId);
+            if (info) info.partialNotes.push(`Failed to add item to receipt document: ${err?.message || 'Bitrix error'}`);
+          }
+        }
       }
     }
 
@@ -640,9 +662,30 @@ export class StockReceiptImportService {
               }
             }
           });
+        } else {
+          for (const el of deductionElements) {
+            const matchedItem = itemsToProcess.find(it => {
+              const info = itemAdjustmentInfo.get(it.recordId);
+              return info && info.productId === el.productId;
+            });
+            if (matchedItem) {
+              const info = itemAdjustmentInfo.get(matchedItem.recordId);
+              if (info) info.partialNotes.push('Failed to create or obtain stock deduction document in Bitrix');
+            }
+          }
         }
       } catch (err: any) {
         logger.warn({ err: err?.message }, 'Failed to batch add deduction elements');
+        for (const el of deductionElements) {
+          const matchedItem = itemsToProcess.find(it => {
+            const info = itemAdjustmentInfo.get(it.recordId);
+            return info && info.productId === el.productId;
+          });
+          if (matchedItem) {
+            const info = itemAdjustmentInfo.get(matchedItem.recordId);
+            if (info) info.partialNotes.push(`Failed to add item to deduction document: ${err?.message || 'Bitrix error'}`);
+          }
+        }
       }
     }
 
@@ -651,7 +694,8 @@ export class StockReceiptImportService {
       const info = itemAdjustmentInfo.get(item.recordId);
       if (!info) continue;
 
-      const status: StockReceiptResultStatus = info.partialNotes.length > 0 ? 'PARTIAL_FAILURE' : 'SUCCESS';
+      const hasError = info.partialNotes.length > 0;
+      const status: StockReceiptResultStatus = hasError ? 'FAILED' : 'SUCCESS';
 
       results.set(item.recordId, {
         status,
@@ -666,7 +710,7 @@ export class StockReceiptImportService {
         dealerPrice: item.dealerPrice,
         endUserPrice: item.endUserPrice,
         qtyOnOrder: item.qtyOnOrder,
-        errorMessage: info.partialNotes.length > 0 ? info.partialNotes.join('; ') : undefined,
+        errorMessage: hasError ? info.partialNotes.join('; ') : undefined,
       });
     }
 
