@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { getImport, getImportRecords, downloadErrorReport, retryFailed } from '../services/import.api';
+import { getImport, getImportRecords, downloadErrorReport, retryFailed, retrySingleRecord } from '../services/import.api';
 import type { ImportJob, ImportRecord, ImportRecordsSummary } from '../types';
 import StatusBadge from '../components/StatusBadge';
 import ImportProgress from '../components/ImportProgress';
@@ -30,6 +30,7 @@ export default function ImportDetails() {
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [error, setError] = useState('');
   const [retrying, setRetrying] = useState(false);
+  const [retryingRecordId, setRetryingRecordId] = useState<string | null>(null);
 
   // Table filters & pagination
   const [activeTab, setActiveTab] = useState<RecordTab>('ALL');
@@ -119,7 +120,7 @@ export default function ImportDetails() {
     try {
       const res = await retryFailed(id);
       if (res.success) {
-        toast.success(`Retrying ${res.data?.retriedCount || 0} failed records`);
+        toast.success(`Retrying ${res.data?.retriedCount || 0} failed record(s)`);
         await loadImport();
         await fetchRecords(true);
       } else {
@@ -129,6 +130,25 @@ export default function ImportDetails() {
       toast.error(err.response?.data?.message || 'Retry failed');
     } finally {
       setRetrying(false);
+    }
+  };
+
+  const handleRetrySingle = async (recordId: string) => {
+    if (!id || retryingRecordId) return;
+    setRetryingRecordId(recordId);
+    try {
+      const res = await retrySingleRecord(id, recordId);
+      if (res.success) {
+        toast.success('Record retried successfully');
+        await loadImport();
+        await fetchRecords(false);
+      } else {
+        toast.error(res.message || 'Retry failed');
+      }
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || 'Retry failed');
+    } finally {
+      setRetryingRecordId(null);
     }
   };
 
@@ -184,7 +204,7 @@ export default function ImportDetails() {
             className="btn-primary text-sm"
             disabled={retrying || failedCount === 0}
           >
-            {retrying ? 'Retrying...' : 'Retry Failed Records'}
+            {retrying ? 'Retrying...' : failedCount > 0 ? `Retry Failed Records (${failedCount})` : 'Retry Failed Records'}
           </button>
         </div>
       </div>
@@ -490,15 +510,34 @@ export default function ImportDetails() {
                       </td>
                       <td className="px-3 py-2 text-xs max-w-md">
                         {isFailed ? (
-                          <div className="space-y-0.5">
+                          <div className="space-y-1">
                             <div className="text-red-700 font-medium break-words">
                               {rec.errorMessage || rec.bitrixError || 'Record failed during processing'}
                             </div>
-                            {rec.errorType && (
-                              <span className="inline-block px-1.5 py-0.2 rounded text-[10px] font-semibold bg-red-100 text-red-800">
-                                {rec.errorType.replace(/_/g, ' ')}
-                              </span>
-                            )}
+                            <div className="flex items-center gap-2 pt-0.5">
+                              {rec.errorType && (
+                                <span className="inline-block px-1.5 py-0.2 rounded text-[10px] font-semibold bg-red-100 text-red-800">
+                                  {rec.errorType.replace(/_/g, ' ')}
+                                </span>
+                              )}
+                              <button
+                                onClick={() => handleRetrySingle(rec.id)}
+                                disabled={retryingRecordId === rec.id}
+                                className="text-[11px] font-medium text-indigo-600 hover:text-indigo-800 hover:underline inline-flex items-center gap-1 disabled:opacity-50"
+                              >
+                                {retryingRecordId === rec.id ? (
+                                  <>
+                                    <svg className="animate-spin h-3 w-3 text-indigo-600" fill="none" viewBox="0 0 24 24">
+                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                                    </svg>
+                                    <span>Retrying...</span>
+                                  </>
+                                ) : (
+                                  <span>↻ Retry this record</span>
+                                )}
+                              </button>
+                            </div>
                           </div>
                         ) : isSuccess ? (
                           <div className="text-emerald-700 font-medium flex items-center gap-1.5">

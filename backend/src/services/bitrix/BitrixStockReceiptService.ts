@@ -199,6 +199,37 @@ export class BitrixStockReceiptService {
     }
   }
 
+  async batchGetStoreStock(productIds: number[], storeId?: number): Promise<Map<number, number>> {
+    const stockMap = new Map<number, number>();
+    const cleanIds = Array.from(new Set(productIds.filter(id => id && Number(id) > 0).map(id => Number(id))));
+    if (cleanIds.length === 0) return stockMap;
+
+    const targetStoreId = (storeId !== undefined && storeId !== null && Number(storeId) > 0) ? Number(storeId) : 1;
+    const CHUNK_SIZE = 50;
+
+    for (let i = 0; i < cleanIds.length; i += CHUNK_SIZE) {
+      const chunk = cleanIds.slice(i, i + CHUNK_SIZE);
+      try {
+        const listRes = await this.client.callMethod('catalog.storeproduct.list', {
+          filter: { '=productId': chunk, storeId: targetStoreId },
+          select: ['id', 'productId', 'amount'],
+        });
+        const items = (listRes && (listRes.storeProducts || listRes.result?.storeProducts || listRes.result || listRes)) || [];
+        if (Array.isArray(items)) {
+          for (const item of items) {
+            if (item.productId && item.amount !== undefined && item.amount !== null && !isNaN(Number(item.amount))) {
+              stockMap.set(Number(item.productId), Number(item.amount));
+            }
+          }
+        }
+      } catch (err: any) {
+        logger.warn({ err: err?.message, storeId: targetStoreId }, 'Failed to batch fetch store stock');
+      }
+    }
+
+    return stockMap;
+  }
+
   async preloadWarehouseStock(storeId: number = 1): Promise<Map<string, number>> {
     const stockMap = new Map<string, number>();
     try {

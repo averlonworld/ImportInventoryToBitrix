@@ -488,13 +488,13 @@ export class ImportController {
         },
       });
 
-      // Reset job status
+      // Reset job status for retrying failed records
       await prisma.importJob.update({
         where: { id },
         data: {
           status: 'PENDING',
           failedRows: 0,
-          processedRows: 0,
+          processedRows: Math.max(0, (importJob.totalRows || 0) - updated.count),
           startedAt: null,
           completedAt: null,
         },

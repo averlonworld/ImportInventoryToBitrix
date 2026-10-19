@@ -434,17 +434,28 @@ export class StockReceiptImportService {
     const codesToLookup = eligibleItems.map(it => it.code);
     const foundProductMap = await productService.batchFindProductsByCodes(codesToLookup);
 
+    // Batch fallback for barcodes if present on unmatched items
+    const unmatchedBarcodes = eligibleItems
+      .filter(it => !foundProductMap.has(it.code.toUpperCase()) && it.barcode)
+      .map(it => it.barcode!);
+    const foundBarcodeMap = unmatchedBarcodes.length > 0
+      ? await productService.batchFindProductsByBarcodes(unmatchedBarcodes)
+      : new Map<string, any>();
+
     // Filter out items based on importMode and map existing IDs
     const itemsToProcess: typeof eligibleItems = [];
     const itemExistingProduct = new Map<string, any>();
 
     for (const item of eligibleItems) {
       let existing = foundProductMap.get(item.code.toUpperCase());
+      if (!existing && item.barcode) {
+        existing = foundBarcodeMap.get(String(item.barcode).trim().toUpperCase());
+      }
       // Fallback for SKU if different from code
       if (!existing && item.rowData.sku && item.rowData.sku !== item.code) {
         existing = await productService.findProductBySku(item.rowData.sku);
       }
-      if (!existing && item.barcode) {
+      if (!existing && item.barcode && !foundBarcodeMap.has(String(item.barcode).trim().toUpperCase())) {
         existing = await productService.findProductByBarcode(item.barcode);
       }
 
@@ -510,9 +521,74 @@ export class StockReceiptImportService {
     // Step 5: Stock Replacement & Batch Document Elements (1 batch call for 50 products)
     const receiptElements: Array<{ docId: number; productId: number; amount: number; purchasingPrice?: number; storeTo?: number }> = [];
     const deductionElements: Array<{ docId: number; productId: number; amount: number; purchasingPrice?: number; storeFrom?: number }> = [];
-
     const itemAdjustmentInfo = new Map<string, { productId: number; delta: number; targetQty?: number; actionTaken: 'CREATED' | 'UPDATED'; partialNotes: string[] }>();
 
+    // 5a. Fast stock preparation:
+    // For CREATED products: initial warehouse stock is 0 by definition (0 API calls!).
+    // For UPDATED products: if not already cached in plannedStockMap, batch fetch via catalog.storeproduct.list (1 API call for all 50 items!).
+    const storeLookupGroups = new Map<number, number[]>();
+
+    for (const item of itemsToProcess) {
+      const opRes = syncProductResults.get(item.recordId);
+      if (!opRes || !opRes.id || opRes.error) continue;
+
+      const hasValidStockQty = item.qtyInStock !== undefined && item.qtyInStock !== null && !isNaN(Number(item.qtyInStock));
+      if (!hasValidStockQty) continue;
+
+      const productId = opRes.id;
+      const stockKey = `${productId}_${item.targetStoreId}`;
+
+      if (opRes.actionTaken === 'CREATED') {
+        if (docContext.plannedStockMap && !docContext.plannedStockMap.has(stockKey)) {
+          docContext.plannedStockMap.set(stockKey, 0);
+        }
+      } else if (opRes.actionTaken === 'UPDATED') {
+        if (!docContext.plannedStockMap || !docContext.plannedStockMap.has(stockKey)) {
+          const list = storeLookupGroups.get(item.targetStoreId) || [];
+          list.push(productId);
+          storeLookupGroups.set(item.targetStoreId, list);
+        }
+      }
+    }
+
+    // 5b. Batch fetch store stock for all UPDATED products (1 batch call per store, eliminating 50 individual calls)
+    for (const [storeId, pids] of storeLookupGroups.entries()) {
+      try {
+        const stockMap = await stockReceiptService.batchGetStoreStock(pids, storeId);
+        for (const pid of pids) {
+          const stockKey = `${pid}_${storeId}`;
+          let currentStock = stockMap.get(pid);
+
+          // If no storeproduct row exists in Bitrix yet, fallback to catalog quantity from Step 2
+          if (currentStock === undefined) {
+            const matchedItem = itemsToProcess.find(it => {
+              const res = syncProductResults.get(it.recordId);
+              return res && res.id === pid;
+            });
+            const existing = matchedItem ? itemExistingProduct.get(matchedItem.recordId) : null;
+            if (existing && existing.quantity !== undefined && existing.quantity !== null && !isNaN(Number(existing.quantity))) {
+              currentStock = Number(existing.quantity);
+            } else {
+              currentStock = 0;
+            }
+          }
+
+          if (docContext.plannedStockMap) {
+            docContext.plannedStockMap.set(stockKey, currentStock);
+          }
+        }
+      } catch (err: any) {
+        logger.warn({ err: err?.message, storeId }, 'Failed to batch fetch store stock for updated products; defaulting to 0');
+        for (const pid of pids) {
+          const stockKey = `${pid}_${storeId}`;
+          if (docContext.plannedStockMap && !docContext.plannedStockMap.has(stockKey)) {
+            docContext.plannedStockMap.set(stockKey, 0);
+          }
+        }
+      }
+    }
+
+    // 5c. Calculate stock deltas purely in-memory (0 API calls!)
     for (const item of itemsToProcess) {
       const opRes = syncProductResults.get(item.recordId);
       if (!opRes || !opRes.id || opRes.error) {
@@ -531,12 +607,7 @@ export class StockReceiptImportService {
 
       if (targetQty !== undefined) {
         const stockKey = `${productId}_${item.targetStoreId}`;
-        let previousStock = 0;
-        if (docContext.plannedStockMap && docContext.plannedStockMap.has(stockKey)) {
-          previousStock = docContext.plannedStockMap.get(stockKey)!;
-        } else {
-          previousStock = await stockReceiptService.getCurrentStoreStock(productId, item.targetStoreId);
-        }
+        const previousStock = (docContext.plannedStockMap && docContext.plannedStockMap.get(stockKey)) ?? 0;
 
         delta = targetQty - previousStock;
         if (delta === 0 && docContext.plannedStockMap) {
@@ -593,7 +664,13 @@ export class StockReceiptImportService {
             if (elRes && elRes.success) {
               if (docContext.onElementAdded) docContext.onElementAdded('S', el.productId, el.amount);
               if (docContext.plannedStockMap && el.storeTo) {
-                docContext.plannedStockMap.set(`${el.productId}_${el.storeTo}`, el.amount);
+                const matchedItem = itemsToProcess.find(it => {
+                  const info = itemAdjustmentInfo.get(it.recordId);
+                  return info && info.productId === el.productId;
+                });
+                const info = matchedItem ? itemAdjustmentInfo.get(matchedItem.recordId) : null;
+                const newStock = info?.targetQty !== undefined ? info.targetQty : el.amount;
+                docContext.plannedStockMap.set(`${el.productId}_${el.storeTo}`, newStock);
               }
             } else {
               const matchedItem = itemsToProcess.find(it => {
@@ -649,7 +726,13 @@ export class StockReceiptImportService {
             if (elRes && elRes.success) {
               if (docContext.onElementAdded) docContext.onElementAdded('D', el.productId, el.amount);
               if (docContext.plannedStockMap && el.storeFrom) {
-                docContext.plannedStockMap.set(`${el.productId}_${el.storeFrom}`, 0);
+                const matchedItem = itemsToProcess.find(it => {
+                  const info = itemAdjustmentInfo.get(it.recordId);
+                  return info && info.productId === el.productId;
+                });
+                const info = matchedItem ? itemAdjustmentInfo.get(matchedItem.recordId) : null;
+                const newStock = info?.targetQty !== undefined ? info.targetQty : 0;
+                docContext.plannedStockMap.set(`${el.productId}_${el.storeFrom}`, newStock);
               }
             } else {
               const matchedItem = itemsToProcess.find(it => {

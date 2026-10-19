@@ -456,6 +456,37 @@ export class BitrixProductService {
     return map;
   }
 
+  async batchFindProductsByBarcodes(barcodes: string[]): Promise<Map<string, any>> {
+    const map = new Map<string, any>();
+    const clean = Array.from(new Set(barcodes.map(b => String(b || '').trim()).filter(Boolean)));
+    if (clean.length === 0 || !this.context.barcodePropertyId) return map;
+
+    const barcodeProp = `property${this.context.barcodePropertyId}`;
+    const select = ['id', 'iblockId', 'name', 'code', 'quantity', barcodeProp];
+    const CHUNK_SIZE = 50;
+
+    for (let i = 0; i < clean.length; i += CHUNK_SIZE) {
+      const chunk = clean.slice(i, i + CHUNK_SIZE);
+      try {
+        const result = await this.client.callMethod('catalog.product.list', {
+          select,
+          filter: { iblockId: this.context.catalogId, [`=${barcodeProp}`]: chunk },
+        });
+        const products = (result && result.products) || [];
+        for (const p of products) {
+          const rawProp = p[barcodeProp] || p[`PROPERTY_${this.context.barcodePropertyId}`];
+          const bc = rawProp ? (typeof rawProp === 'object' ? rawProp.value : rawProp) : p.barcode;
+          if (bc) {
+            map.set(String(bc).trim().toUpperCase(), { ...p, barcode: bc });
+          }
+        }
+      } catch (err: any) {
+        logger.warn({ err: err?.message, chunkCount: chunk.length }, 'Failed to batch lookup products by barcodes');
+      }
+    }
+    return map;
+  }
+
   buildCatalogProductFields(input: InventoryProductInput, isNew = false): any {
     const partNum = (input.partNumber || '').trim();
     const codeVal = (input.code || '').trim();
