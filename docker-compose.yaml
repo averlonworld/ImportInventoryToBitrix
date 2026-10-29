@@ -1,6 +1,29 @@
 services:
 
   # ==========================================
+  # PostgreSQL (primary datastore)
+  # ==========================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: bitrix_inventory_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bitrix_inventory}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-bitrix_inventory}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - prod-network
+
+  # ==========================================
   # Redis (BullMQ queue backing store)
   # ==========================================
   redis:
@@ -10,6 +33,9 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     expose:
       - "6379"
+    ports:
+      # Published for a backend running on the host (npm start) during local dev.
+      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -42,10 +68,12 @@ services:
       POSTGRES_PORT: "5432"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      DATABASE_URL: postgresql://${POSTGRES_USER:-b24_inventory}:Inventory7897@postgres:5432/${POSTGRES_DB:-bitrix_inventory}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-bitrix_inventory}
       REDIS_URL: redis://redis:6379
       COOKIE_SECURE: "true"
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     networks:
@@ -72,11 +100,13 @@ services:
       - lms-network
 
 networks:
+  # Created automatically if missing; reused if they already exist on the host.
   prod-network:
-    external: true
+    name: prod-network
   lms-network:
-    external: true
+    name: lms-network
 
 volumes:
+  postgres_data:
   redis_data:
 

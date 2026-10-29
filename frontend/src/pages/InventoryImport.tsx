@@ -1,11 +1,12 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import FileUploader from '../components/FileUploader';
 import DataPreview from '../components/DataPreview';
 import ImportProgress from '../components/ImportProgress';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { previewFile, createImport, downloadTemplate } from '../services/import.api';
-import type { ImportPreview } from '../types';
+import { getStores } from '../services/bitrix.api';
+import type { ImportPreview, BitrixStore } from '../types';
 import { estimateTotalDuration } from '../utils/timeEstimate';
 
 // Steps requested: Upload -> Preview -> Confirm -> Import -> Result (Map Columns removed)
@@ -144,6 +145,37 @@ export default function InventoryImport() {
   const [creatingImport, setCreatingImport] = useState(false);
   const [documentTitle, setDocumentTitle] = useState('');
 
+  // Dynamic Bitrix24 warehouse discovery
+  const [stores, setStores] = useState<BitrixStore[]>([]);
+  const [selectedStoreId, setSelectedStoreId] = useState<number | ''>('');
+  const [storesLoading, setStoresLoading] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchStores = async () => {
+      setStoresLoading(true);
+      try {
+        const res = await getStores();
+        if (isMounted && res.success && Array.isArray(res.data) && res.data.length > 0) {
+          setStores(res.data);
+          const main = res.data.find(s => (s.active === 'Y' || s.active === undefined) && s.title.toLowerCase().includes('main'))
+            || res.data.find(s => s.title.toLowerCase().includes('main'))
+            || res.data.find(s => s.active === 'Y')
+            || res.data[0];
+          if (main) {
+            setSelectedStoreId(main.id);
+          }
+        }
+      } catch {
+        // Fallback gracefully
+      } finally {
+        if (isMounted) setStoresLoading(false);
+      }
+    };
+    fetchStores();
+    return () => { isMounted = false; };
+  }, []);
+
   // Step 0 -> Step 1: Upload and auto-preview
   const handleUploaded = useCallback(async (data: UploadedFile) => {
     setUploadedFile(data);
@@ -230,7 +262,7 @@ export default function InventoryImport() {
           qtyOnOrderField: mapping.qtyOnOrderField || '',
           priceField: mapping.endUserPriceField || mapping.priceField || '',
           barcodeField: mapping.barcodeField,
-          defaultStoreId: 62,
+          defaultStoreId: selectedStoreId ? Number(selectedStoreId) : undefined,
           documentTitle: finalDocTitle,
         },
         importMode,
@@ -575,10 +607,49 @@ export default function InventoryImport() {
               </p>
             </div>
 
+            {/* Destination Warehouse Configuration in Step 2 */}
+            <div className="bg-white rounded-lg p-4 space-y-2 border border-emerald-200 shadow-sm">
+              <div className="flex items-center justify-between">
+                <label className="block text-sm font-bold text-gray-900">
+                  Destination Warehouse / Store
+                </label>
+                {stores.length > 0 && (
+                  <span className="text-[11px] px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded font-medium border border-emerald-200">
+                    {stores.length} warehouse{stores.length > 1 ? 's' : ''} detected
+                  </span>
+                )}
+              </div>
+              {storesLoading ? (
+                <div className="text-xs text-gray-500 py-1 flex items-center gap-2">
+                  <div className="w-3.5 h-3.5 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin"></div>
+                  Discovering Bitrix24 warehouses for this portal...
+                </div>
+              ) : stores.length > 0 ? (
+                <select
+                  className="input-field text-sm font-medium text-gray-900 border-gray-300"
+                  value={selectedStoreId}
+                  onChange={(e) => setSelectedStoreId(e.target.value ? Number(e.target.value) : '')}
+                >
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.title} (ID: {s.id}) {s.active === 'N' ? '[Inactive]' : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div className="text-xs text-amber-700 bg-amber-50 p-2.5 rounded border border-amber-200">
+                  No explicit warehouses found on this Bitrix24 account. The portal's primary default catalog store will be targeted automatically.
+                </div>
+              )}
+              <p className="text-xs text-gray-500">
+                Stock receipt document items and inventory quantities will be recorded directly into this warehouse.
+              </p>
+            </div>
+
             {/* Import Summary */}
             <div className="bg-gray-50 rounded-lg p-4 space-y-3 border border-gray-200">
               <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wider">Import Overview</h3>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 text-sm">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-4 text-sm">
                 <div>
                   <span className="text-xs text-gray-500 block">File Name</span>
                   <span className="font-semibold text-gray-900 truncate block">{preview.fileName}</span>
@@ -586,6 +657,12 @@ export default function InventoryImport() {
                 <div>
                   <span className="text-xs text-gray-500 block">Document Title</span>
                   <span className="font-semibold text-blue-700 truncate block">{documentTitle || preview.fileName.replace(/\.[^/.]+$/, '')}</span>
+                </div>
+                <div>
+                  <span className="text-xs text-gray-500 block">Warehouse</span>
+                  <span className="font-semibold text-emerald-700 truncate block">
+                    {stores.find(s => s.id === selectedStoreId)?.title || (selectedStoreId ? `Store #${selectedStoreId}` : 'Primary Warehouse')}
+                  </span>
                 </div>
                 <div>
                   <span className="text-xs text-gray-500 block">Total Items</span>

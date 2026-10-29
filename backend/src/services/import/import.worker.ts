@@ -105,7 +105,7 @@ export function extractRowData(record: any, mapping: any, importType: ImportType
       warehouse: mapping.warehouseField ? String(rawData[mapping.warehouseField] ?? '').trim() : undefined,
       quantityDestination: mapping.quantityDestinationField ? num(rawData[mapping.quantityDestinationField]) : undefined,
       total: mapping.totalField ? num(rawData[mapping.totalField]) : undefined,
-      defaultStoreId: mapping.defaultStoreId ? Number(mapping.defaultStoreId) : 1,
+      defaultStoreId: mapping.defaultStoreId ? Number(mapping.defaultStoreId) : undefined,
     };
   }
 
@@ -216,9 +216,18 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
         const client = sharedBitrixClient || await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
         const stockReceiptService = new BitrixStockReceiptService(client);
         storesList = await stockReceiptService.getStores();
-        const mainStore = storesList.find(s => s.title.toLowerCase().includes('main') || s.id === 62) || storesList[0];
-        const targetStoreId = effectiveMapping.defaultStoreId ? Number(effectiveMapping.defaultStoreId) : (mainStore ? mainStore.id : 1);
-        logger.info(`Initialized warehouse context for store ${targetStoreId} (${storesList.length} stores available)`);
+        const resolvedStore = await stockReceiptService.resolveDefaultStoreId(
+          effectiveMapping.defaultStoreId ? Number(effectiveMapping.defaultStoreId) : undefined,
+          storesList
+        );
+        if (resolvedStore) {
+          effectiveMapping.defaultStoreId = resolvedStore;
+          logger.info(`Initialized warehouse context for store ${resolvedStore} (${storesList.length} stores available)`);
+        }
+
+        // Clean up superseded document(s) with the same title before processing
+        // so that re-importing the same document title reflects only the latest numbers (e.g. 12 instead of 1131)
+        await stockReceiptService.cancelAndRemoveExistingDocumentsByTitle(docTitle);
       } catch (err: any) {
         logger.warn({ err: err?.message }, 'Failed to fetch stores list; defaulting to primary store');
       }
@@ -793,16 +802,14 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
             const conductRes = await stockReceiptService.conductDocument(docId);
             if (conductRes.success) {
               conductedDocs.push(docId);
-              logger.info(`Conducted Bitrix inventory document (${typeLabel}) ID ${docId}`);
-              debugLog.info('WORKER', `Conducted Bitrix inventory document (${typeLabel}) ID ${docId}`);
+              logger.info(`Conducted Bitrix inventory document (${typeLabel}) ID ${docId} (status: ${conductRes.status || 'Y'})`);
+              debugLog.info('WORKER', `Conducted Bitrix inventory document (${typeLabel}) ID ${docId}`, { docId, status: conductRes.status });
             } else {
-              const errStr = `Could not conduct Bitrix inventory document ID ${docId}: ${conductRes.error}`;
+              const errStr = `Bitrix inventory document #${docId} (${typeLabel}) could not be processed: ${conductRes.error}`;
               logger.error(errStr);
-              debugLog.error('WORKER', errStr);
+              debugLog.error('WORKER', errStr, { docId, typeLabel, error: conductRes.error });
               conductionError = conductRes.error || errStr;
 
-              // If Bitrix identified specific bad product IDs (e.g. line items with incorrect product quantity ID #123),
-              // mark ONLY those specific product records as FAILED.
               const badIds = [...(conductionError || '').matchAll(/#(\d+)/g)].map(m => String(m[1]));
               if (badIds.length > 0) {
                 await prisma.importRecord.updateMany({
@@ -812,15 +819,24 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
                   },
                   data: {
                     status: 'FAILED',
-                    errorMessage: `Bitrix inventory document #${docId} conduction failed: ${conductionError}`,
+                    errorMessage: errStr,
                     errorType: 'BITRIX_API_ERROR',
                   },
                 });
                 logger.warn({ docId, badIds }, 'Marked specific bad-element records as FAILED');
               } else {
-                // If conduction failed without identifying specific product IDs, do NOT wipe out
-                // records whose products and prices were successfully created/updated in Bitrix.
-                logger.warn({ docId, err: conductionError }, 'Stock document conduction encountered an issue; product records remain intact');
+                await prisma.importRecord.updateMany({
+                  where: {
+                    importJobId,
+                    status: 'SUCCESS',
+                  },
+                  data: {
+                    status: 'PARTIAL_FAILURE',
+                    errorMessage: errStr,
+                    errorType: 'BITRIX_API_ERROR',
+                  },
+                });
+                logger.warn({ docId, err: conductionError }, 'Marked records as PARTIAL_FAILURE due to unconducted document');
               }
             }
           } else {
@@ -862,6 +878,8 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
     let finalStatus = 'COMPLETED';
     if (failedCount > 0 && successCount === 0 && partialCount === 0) {
       finalStatus = 'FAILED';
+    } else if (conductionError || partialCount > 0) {
+      finalStatus = 'COMPLETED_WITH_ERRORS';
     }
 
     await prisma.importJob.update({

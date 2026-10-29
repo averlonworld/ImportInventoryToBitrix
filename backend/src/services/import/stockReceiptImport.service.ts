@@ -136,25 +136,11 @@ export class StockReceiptImportService {
         }
       }
 
-      if (!resolvedStoreId && (mapping.defaultStoreId || rowData.defaultStoreId)) {
-        const reqStoreId = Number(mapping.defaultStoreId || rowData.defaultStoreId);
-        if (storesList && storesList.some(s => s.id === reqStoreId)) {
-          resolvedStoreId = reqStoreId;
-        }
-      }
-
       if (!resolvedStoreId) {
-        if (!storesList || storesList.length === 0) {
-          try {
-            storesList = await stockReceiptService.getStores();
-          } catch {
-            storesList = [];
-          }
-        }
-        if (storesList && storesList.length > 0) {
-          const mainStore = storesList.find(s => s.title.toLowerCase().includes('main') || s.id === 62);
-          resolvedStoreId = mainStore ? mainStore.id : storesList[0].id;
-        }
+        resolvedStoreId = await stockReceiptService.resolveDefaultStoreId(
+          mapping.defaultStoreId || rowData.defaultStoreId,
+          storesList
+        );
       }
       if (!resolvedStoreId) resolvedStoreId = 1;
 
@@ -355,13 +341,10 @@ export class StockReceiptImportService {
     const productService = new BitrixProductService(client, context);
 
     // Resolve default store ID
-    let resolvedDefaultStoreId = 1;
-    if (mapping.defaultStoreId) {
-      resolvedDefaultStoreId = Number(mapping.defaultStoreId);
-    } else if (storesList && storesList.length > 0) {
-      const mainStore = storesList.find(s => s.title.toLowerCase().includes('main') || s.id === 62) || storesList[0];
-      resolvedDefaultStoreId = mainStore ? mainStore.id : 1;
-    }
+    const resolvedDefaultStoreId = (await stockReceiptService.resolveDefaultStoreId(
+      mapping.defaultStoreId ? Number(mapping.defaultStoreId) : undefined,
+      storesList
+    )) || 1;
 
     // Step 1: Pre-validate each row
     const eligibleItems: Array<{

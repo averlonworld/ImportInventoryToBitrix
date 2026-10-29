@@ -53,6 +53,38 @@ export class BitrixStockReceiptService {
     }
   }
 
+  /**
+   * Dynamically resolves the warehouse ID for this Bitrix24 portal.
+   * If a specific storeId is provided, validates that it exists on this portal.
+   * Otherwise finds the active 'Main' store, or the first active store, or the first available store.
+   */
+  async resolveDefaultStoreId(providedStoreId?: number, preloadedStores?: BitrixStore[]): Promise<number | undefined> {
+    const stores = (preloadedStores && preloadedStores.length > 0)
+      ? preloadedStores
+      : await this.getStores();
+
+    if (!stores || stores.length === 0) {
+      return (providedStoreId && Number(providedStoreId) > 0) ? Number(providedStoreId) : undefined;
+    }
+
+    // If caller provided a store ID, verify that it actually exists on this Bitrix24 portal
+    if (providedStoreId && Number(providedStoreId) > 0) {
+      const matched = stores.find(s => s.id === Number(providedStoreId));
+      if (matched) {
+        return matched.id;
+      }
+      logger.warn({ providedStoreId, availableStores: stores.map(s => s.id) }, 'Requested storeId does not exist on this Bitrix portal; resolving dynamically');
+    }
+
+    // Try finding active store titled 'main', then any store titled 'main', then any active store, then the first store
+    const mainStore = stores.find(s => (s.active === 'Y' || s.active === undefined) && s.title.toLowerCase().includes('main'))
+      || stores.find(s => s.title.toLowerCase().includes('main'))
+      || stores.find(s => s.active === 'Y')
+      || stores[0];
+
+    return mainStore ? mainStore.id : undefined;
+  }
+
   async getDiscoveryFields(): Promise<{
     stockReceiptFields: StockReceiptField[];
     catalogFields: StockReceiptField[];
@@ -171,7 +203,12 @@ export class BitrixStockReceiptService {
 
   async getCurrentStoreStock(productId: number, storeId?: number): Promise<number> {
     try {
-      const targetStoreId = (storeId !== undefined && storeId !== null && Number(storeId) > 0) ? Number(storeId) : 1;
+      let targetStoreId = (storeId !== undefined && storeId !== null && Number(storeId) > 0) ? Number(storeId) : undefined;
+      if (!targetStoreId) {
+        targetStoreId = await this.resolveDefaultStoreId();
+      }
+      if (!targetStoreId) return 0;
+
       const listRes = await this.client.callMethod('catalog.storeproduct.list', {
         filter: { productId: Number(productId), storeId: Number(targetStoreId) },
       });
@@ -204,7 +241,12 @@ export class BitrixStockReceiptService {
     const cleanIds = Array.from(new Set(productIds.filter(id => id && Number(id) > 0).map(id => Number(id))));
     if (cleanIds.length === 0) return stockMap;
 
-    const targetStoreId = (storeId !== undefined && storeId !== null && Number(storeId) > 0) ? Number(storeId) : 1;
+    let targetStoreId = (storeId !== undefined && storeId !== null && Number(storeId) > 0) ? Number(storeId) : undefined;
+    if (!targetStoreId) {
+      targetStoreId = await this.resolveDefaultStoreId();
+    }
+    if (!targetStoreId) return stockMap;
+
     const CHUNK_SIZE = 50;
 
     for (let i = 0; i < cleanIds.length; i += CHUNK_SIZE) {
@@ -230,20 +272,26 @@ export class BitrixStockReceiptService {
     return stockMap;
   }
 
-  async preloadWarehouseStock(storeId: number = 1): Promise<Map<string, number>> {
+  async preloadWarehouseStock(storeId?: number): Promise<Map<string, number>> {
     const stockMap = new Map<string, number>();
     try {
+      let targetStoreId = (storeId !== undefined && storeId !== null && Number(storeId) > 0) ? Number(storeId) : undefined;
+      if (!targetStoreId) {
+        targetStoreId = await this.resolveDefaultStoreId();
+      }
+      if (!targetStoreId) return stockMap;
+
       let start = 0;
       while (true) {
         const res = await (this.client as any).request('post', 'catalog.storeproduct.list', {
-          filter: { storeId: Number(storeId) },
+          filter: { storeId: Number(targetStoreId) },
           select: ['id', 'productId', 'amount'],
           start,
         });
         const items = res?.result?.storeProducts || [];
         for (const item of items) {
           if (item.productId && item.amount !== undefined && item.amount !== null) {
-            stockMap.set(`${item.productId}_${storeId}`, Number(item.amount));
+            stockMap.set(`${item.productId}_${targetStoreId}`, Number(item.amount));
           }
         }
         if (!res?.next || items.length === 0) {
@@ -251,7 +299,7 @@ export class BitrixStockReceiptService {
         }
         start = res.next;
       }
-      debugLog.info('BITRIX', `Preloaded ${stockMap.size} store product records for store ${storeId}`);
+      debugLog.info('BITRIX', `Preloaded ${stockMap.size} store product records for store ${targetStoreId}`);
     } catch (err: any) {
       logger.warn({ err: err?.message, storeId }, 'Failed to preload warehouse stock; will use on-demand lookups');
     }
@@ -271,6 +319,13 @@ export class BitrixStockReceiptService {
     const valid = elements.filter(el => Number(el.amount) > 0);
     if (valid.length === 0) return { added: 0, failed: 0, results: [] };
 
+    // Resolve dynamic fallback warehouse if any item doesn't specify storeTo / storeFrom
+    let fallbackStoreTo: number | undefined;
+    const needsFallback = valid.some(el => (!el.storeTo || Number(el.storeTo) <= 0) && (!el.storeFrom || Number(el.storeFrom) <= 0));
+    if (needsFallback) {
+      fallbackStoreTo = await this.resolveDefaultStoreId();
+    }
+
     const calls = valid.map(el => {
       const fields: any = {
         docId: Number(el.docId),
@@ -287,8 +342,8 @@ export class BitrixStockReceiptService {
       }
       if (el.storeTo && Number(el.storeTo) > 0) {
         fields.storeTo = Number(el.storeTo);
-      } else if (!el.storeFrom) {
-        fields.storeTo = 1;
+      } else if (!el.storeFrom && fallbackStoreTo) {
+        fields.storeTo = fallbackStoreTo;
       }
       return {
         method: 'catalog.document.element.add',
@@ -315,6 +370,57 @@ export class BitrixStockReceiptService {
     } catch (err: any) {
       logger.warn({ err: err?.message, docId }, 'Failed to delete draft inventory document');
       return false;
+    }
+  }
+
+  async cancelDocument(docId: number): Promise<boolean> {
+    try {
+      await this.client.callMethod('catalog.document.cancel', { id: Number(docId) });
+      return true;
+    } catch (err: any) {
+      logger.warn({ err: err?.message, docId }, 'Failed to cancel document');
+      return false;
+    }
+  }
+
+  async cancelAndRemoveExistingDocumentsByTitle(docTitle: string): Promise<number> {
+    const cleanTitle = (docTitle || '').trim();
+    if (!cleanTitle) return 0;
+    try {
+      const res = await this.client.callMethod('catalog.document.list', {
+        filter: { '%title': cleanTitle },
+      });
+      const docs = (res && (res.documents || res.result?.documents || res.result || res)) || [];
+      if (!Array.isArray(docs) || docs.length === 0) return 0;
+
+      let removedCount = 0;
+      for (const d of docs) {
+        const titleStr = String(d.title || '');
+        if (
+          titleStr === cleanTitle ||
+          titleStr.startsWith(`${cleanTitle} (Adjustment`) ||
+          titleStr.startsWith(`${cleanTitle} (`)
+        ) {
+          const id = Number(d.id);
+          try {
+            await this.client.callMethod('catalog.document.cancel', { id });
+          } catch {
+            // Already cancelled or draft
+          }
+          try {
+            await this.client.callMethod('catalog.document.delete', { id });
+            removedCount++;
+            logger.info({ id, title: titleStr }, 'Cleaned up superseded Bitrix inventory document');
+            debugLog.info('BITRIX', `Cancelled and removed superseded inventory document ID ${id} (${titleStr})`);
+          } catch (delErr: any) {
+            logger.warn({ err: delErr?.message, id }, 'Could not delete superseded document');
+          }
+        }
+      }
+      return removedCount;
+    } catch (err: any) {
+      logger.warn({ err: err?.message, cleanTitle }, 'Error searching existing documents to clean up');
+      return 0;
     }
   }
 
@@ -347,17 +453,13 @@ export class BitrixStockReceiptService {
       if (storeFrom !== undefined && storeFrom !== null && Number(storeFrom) > 0) {
         fields.storeFrom = Number(storeFrom);
       } else {
-        let targetStore = (storeTo !== undefined && storeTo !== null && Number(storeTo) > 0) ? Number(storeTo) : 0;
-        if (targetStore <= 0) {
-          try {
-            const stores = await this.getStores();
-            const main = stores.find(s => s.title.toLowerCase().includes('main') || s.id === 62) || stores[0];
-            targetStore = main ? main.id : 1;
-          } catch {
-            targetStore = 1;
-          }
+        let targetStore = (storeTo !== undefined && storeTo !== null && Number(storeTo) > 0) ? Number(storeTo) : undefined;
+        if (!targetStore) {
+          targetStore = await this.resolveDefaultStoreId();
         }
-        fields.storeTo = targetStore;
+        if (targetStore) {
+          fields.storeTo = targetStore;
+        }
       }
 
       await this.client.callMethod('catalog.document.element.add', { fields });
@@ -369,14 +471,33 @@ export class BitrixStockReceiptService {
     }
   }
 
-  async conductDocument(docId: number): Promise<{ success: boolean; error?: string }> {
+  async conductDocument(docId: number): Promise<{ success: boolean; error?: string; status?: string }> {
     try {
       debugLog.info('BITRIX', `Conducting inventory stock receipt document ID: ${docId}`);
       await this.client.callMethod('catalog.document.conduct', { id: Number(docId) });
-      debugLog.info('BITRIX', `Stock receipt document ID ${docId} successfully conducted`);
-      return { success: true };
+      
+      // Verify final document status from Bitrix
+      let finalStatus = 'Y';
+      try {
+        const docCheck = await this.client.callMethod('catalog.document.get', { id: Number(docId) });
+        const docObj = docCheck?.document || docCheck?.result?.document || docCheck?.result || docCheck;
+        if (docObj && docObj.status) {
+          finalStatus = docObj.status;
+        }
+      } catch {
+        // Non-blocking status verification
+      }
+
+      debugLog.info('BITRIX', `Stock receipt document ID ${docId} conducted with status: ${finalStatus}`);
+      return { success: finalStatus === 'Y' || finalStatus === 'S', status: finalStatus };
     } catch (error: any) {
-      const msg = error.message || 'Unknown error while conducting document';
+      const bitrixError = error?.response?.data?.error || error?.error;
+      const bitrixDesc = error?.response?.data?.error_description || error?.error_description;
+      const httpStatus = error?.response?.status;
+      const msg = bitrixDesc 
+        ? `[HTTP ${httpStatus || 400} / ${bitrixError || 'ERROR'}]: ${bitrixDesc}` 
+        : (error.message || 'Unknown error while conducting document');
+
       // Self-heal: if Bitrix reports line items with incorrect product quantity (e.g. 0 or empty)
       if (msg.includes('incorrect product quantity ID #')) {
         try {
@@ -393,21 +514,25 @@ export class BitrixStockReceiptService {
           // Retry conducting after cleaning up bad elements
           await this.client.callMethod('catalog.document.conduct', { id: Number(docId) });
           debugLog.info('BITRIX', `Stock receipt document ID ${docId} conducted successfully after cleaning bad elements`);
-          return { success: true };
+          return { success: true, status: 'Y' };
         } catch (retryErr: any) {
           logger.warn({ err: retryErr, docId }, 'Cleanup and reconduct failed');
         }
       }
 
-      logger.warn({ err: error, docId }, 'Failed to conduct stock receipt document');
-      debugLog.warn('BITRIX', `Failed to conduct document ${docId}: ${msg}`);
-      return { success: false, error: msg };
+      logger.error({ err: error, docId, httpStatus, bitrixError, bitrixDesc }, `Failed to conduct stock receipt document ${docId}: ${msg}`);
+      debugLog.error('BITRIX', `Failed to conduct document ${docId}: ${msg}`, { docId, httpStatus, bitrixError, bitrixDesc });
+      return { success: false, error: msg, status: 'D' };
     }
   }
 
-  async syncDirectStoreStock(productId: number, storeId: number, amount: number): Promise<boolean> {
+  async syncDirectStoreStock(productId: number, storeId?: number, amount: number = 0): Promise<boolean> {
     try {
-      let targetStoreId = (storeId !== undefined && storeId !== null && Number(storeId) > 0) ? Number(storeId) : 1;
+      let targetStoreId = (storeId !== undefined && storeId !== null && Number(storeId) > 0) ? Number(storeId) : undefined;
+      if (!targetStoreId) {
+        targetStoreId = await this.resolveDefaultStoreId();
+      }
+      if (!targetStoreId) return false;
       const listRes = await this.client.callMethod('catalog.storeproduct.list', {
         filter: { productId: Number(productId), storeId: Number(targetStoreId) },
       });
