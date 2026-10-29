@@ -233,50 +233,119 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
       }
     }
 
-    let receiptDocPromise: Promise<number> | null = null;
+    const MAX_DOC_ELEMENTS = 1000;
+    const totalJobRows = importJob.totalRows || 0;
+    const needsPartNaming = totalJobRows > MAX_DOC_ELEMENTS;
+
+    interface DocumentPart {
+      id: number;
+      part: number;
+      count: number;
+      type: 'S' | 'D';
+      title: string;
+    }
+
+    const receiptParts: DocumentPart[] = [];
+    const deductionParts: DocumentPart[] = [];
+
+    let receiptCreatingPromise: Promise<number> | null = null;
     const getOrCreateReceiptDoc = async (): Promise<number> => {
-      if (receiptDocId) return receiptDocId;
-      if (!receiptDocPromise) {
-        receiptDocPromise = (async () => {
-          const client = sharedBitrixClient || await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
-          const stockReceiptService = new BitrixStockReceiptService(client);
-          const doc = await stockReceiptService.createStockReceiptDocument(
-            `${docTitle} (Adjustment +)`,
-            `Stock replacement upward adjustment for import job ${importJobId}`,
-            undefined,
-            undefined,
-            'S'
-          );
-          receiptDocId = doc.id;
-          stockAdjustmentContext.receiptDocId = doc.id;
-          logger.info(`Created Bitrix stock receipt document ID ${receiptDocId} for job ${importJobId}`);
-          return doc.id;
-        })();
+      while (receiptCreatingPromise) {
+        await receiptCreatingPromise;
       }
-      return receiptDocPromise;
+      let currentPart = receiptParts[receiptParts.length - 1];
+      if (currentPart && currentPart.count < MAX_DOC_ELEMENTS) {
+        return currentPart.id;
+      }
+
+      receiptCreatingPromise = (async () => {
+        const nextPartNum = receiptParts.length + 1;
+        const partSuffix = needsPartNaming || nextPartNum > 1 ? ` - Part ${nextPartNum}` : '';
+        const title = `${docTitle}${partSuffix} (Adjustment +)`;
+
+        const client = sharedBitrixClient || await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
+        const stockReceiptService = new BitrixStockReceiptService(client);
+        const doc = await stockReceiptService.createStockReceiptDocument(
+          title,
+          `Stock replacement upward adjustment (Part ${nextPartNum}) for import job ${importJobId}`,
+          undefined,
+          undefined,
+          'S'
+        );
+
+        const newPart: DocumentPart = {
+          id: doc.id,
+          part: nextPartNum,
+          count: 0,
+          type: 'S',
+          title,
+        };
+        receiptParts.push(newPart);
+        receiptDocId = doc.id;
+        stockAdjustmentContext.receiptDocId = doc.id;
+        logger.info(`Created Bitrix stock receipt document ID ${doc.id} (${title}) for job ${importJobId}`);
+        return doc.id;
+      })();
+
+      try {
+        return await receiptCreatingPromise;
+      } finally {
+        receiptCreatingPromise = null;
+      }
     };
 
-    let deductionDocPromise: Promise<number> | null = null;
+    let deductionCreatingPromise: Promise<number> | null = null;
     const getOrCreateDeductionDoc = async (): Promise<number> => {
-      if (deductionDocId) return deductionDocId;
-      if (!deductionDocPromise) {
-        deductionDocPromise = (async () => {
-          const client = sharedBitrixClient || await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
-          const stockReceiptService = new BitrixStockReceiptService(client);
-          const doc = await stockReceiptService.createStockReceiptDocument(
-            `${docTitle} (Adjustment -)`,
-            `Stock replacement downward adjustment (write-off) for import job ${importJobId}`,
-            undefined,
-            undefined,
-            'D'
-          );
-          deductionDocId = doc.id;
-          stockAdjustmentContext.deductionDocId = doc.id;
-          logger.info(`Created Bitrix stock deduction document ID ${deductionDocId} for job ${importJobId}`);
-          return doc.id;
-        })();
+      while (deductionCreatingPromise) {
+        await deductionCreatingPromise;
       }
-      return deductionDocPromise;
+      let currentPart = deductionParts[deductionParts.length - 1];
+      if (currentPart && currentPart.count < MAX_DOC_ELEMENTS) {
+        return currentPart.id;
+      }
+
+      deductionCreatingPromise = (async () => {
+        const nextPartNum = deductionParts.length + 1;
+        const partSuffix = needsPartNaming || nextPartNum > 1 ? ` - Part ${nextPartNum}` : '';
+        const title = `${docTitle}${partSuffix} (Adjustment -)`;
+
+        const client = sharedBitrixClient || await BitrixClient.fromDbConfiguration(importJob.createdById || undefined);
+        const stockReceiptService = new BitrixStockReceiptService(client);
+        const doc = await stockReceiptService.createStockReceiptDocument(
+          title,
+          `Stock replacement downward adjustment write-off (Part ${nextPartNum}) for import job ${importJobId}`,
+          undefined,
+          undefined,
+          'D'
+        );
+
+        const newPart: DocumentPart = {
+          id: doc.id,
+          part: nextPartNum,
+          count: 0,
+          type: 'D',
+          title,
+        };
+        deductionParts.push(newPart);
+        deductionDocId = doc.id;
+        stockAdjustmentContext.deductionDocId = doc.id;
+        logger.info(`Created Bitrix stock deduction document ID ${doc.id} (${title}) for job ${importJobId}`);
+        return doc.id;
+      })();
+
+      try {
+        return await deductionCreatingPromise;
+      } finally {
+        deductionCreatingPromise = null;
+      }
+    };
+
+    const getRemainingCapacity = (docType: 'S' | 'D'): number => {
+      const parts = docType === 'S' ? receiptParts : deductionParts;
+      const currentPart = parts[parts.length - 1];
+      if (!currentPart) return MAX_DOC_ELEMENTS;
+      const remaining = MAX_DOC_ELEMENTS - currentPart.count;
+      return remaining > 0 ? remaining : MAX_DOC_ELEMENTS;
     };
 
     const stockAdjustmentContext: StockAdjustmentContext = {
@@ -284,9 +353,17 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
       plannedStockMap,
       getOrCreateReceiptDoc,
       getOrCreateDeductionDoc,
+      getRemainingCapacity,
       onElementAdded: (docType) => {
-        if (docType === 'S') receiptElemCount++;
-        else if (docType === 'D') deductionElemCount++;
+        if (docType === 'S') {
+          receiptElemCount++;
+          const cur = receiptParts[receiptParts.length - 1];
+          if (cur) cur.count++;
+        } else if (docType === 'D') {
+          deductionElemCount++;
+          const cur = deductionParts[deductionParts.length - 1];
+          if (cur) cur.count++;
+        }
       },
     };
 
@@ -845,10 +922,19 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
           }
         };
 
-        if (receiptDocId) {
+        if (receiptParts.length > 0) {
+          for (const part of receiptParts) {
+            await finalizeDoc(part.id, part.count, `Stock Replacement (+) Receipt (Part ${part.part})`);
+          }
+        } else if (receiptDocId) {
           await finalizeDoc(receiptDocId, receiptElemCount, 'Stock Replacement (+) Receipt');
         }
-        if (deductionDocId) {
+
+        if (deductionParts.length > 0) {
+          for (const part of deductionParts) {
+            await finalizeDoc(part.id, part.count, `Stock Replacement (-) Deduction (Part ${part.part})`);
+          }
+        } else if (deductionDocId) {
           await finalizeDoc(deductionDocId, deductionElemCount, 'Stock Replacement (-) Deduction');
         }
 

@@ -75,6 +75,7 @@ export interface StockAdjustmentContext {
   plannedStockMap?: Map<string, number>;
   getOrCreateReceiptDoc?: () => Promise<number>;
   getOrCreateDeductionDoc?: () => Promise<number>;
+  getRemainingCapacity?: (docType: 'S' | 'D') => number;
   onElementAdded?: (docType: 'S' | 'D', productId: number, amount: number) => void;
 }
 
@@ -502,9 +503,9 @@ export class StockReceiptImportService {
     }
 
     // Step 5: Stock Replacement & Batch Document Elements (1 batch call for 50 products)
-    const receiptElements: Array<{ docId: number; productId: number; amount: number; purchasingPrice?: number; storeTo?: number }> = [];
-    const deductionElements: Array<{ docId: number; productId: number; amount: number; purchasingPrice?: number; storeFrom?: number }> = [];
-    const itemAdjustmentInfo = new Map<string, { productId: number; delta: number; targetQty?: number; actionTaken: 'CREATED' | 'UPDATED'; partialNotes: string[] }>();
+    const receiptElements: Array<{ docId: number; productId: number; amount: number; purchasingPrice?: number; storeTo?: number; recordId: string }> = [];
+    const deductionElements: Array<{ docId: number; productId: number; amount: number; purchasingPrice?: number; storeFrom?: number; recordId: string }> = [];
+    const itemAdjustmentInfo = new Map<string, { productId: number; delta: number; targetQty?: number; actionTaken: 'CREATED' | 'UPDATED'; partialNotes: string[]; assignedDocId?: number }>();
 
     // 5a. Fast stock preparation:
     // For CREATED products: initial warehouse stock is 0 by definition (0 API calls!).
@@ -607,7 +608,7 @@ export class StockReceiptImportService {
       });
     }
 
-    // Collect elements for documents
+    // Collect elements for documents with item record references
     for (const item of itemsToProcess) {
       const info = itemAdjustmentInfo.get(item.recordId);
       if (!info) continue;
@@ -619,6 +620,7 @@ export class StockReceiptImportService {
           amount: info.delta,
           purchasingPrice: item.cost,
           storeTo: item.targetStoreId,
+          recordId: item.recordId,
         });
       } else if (info.delta < 0) {
         deductionElements.push({
@@ -627,68 +629,64 @@ export class StockReceiptImportService {
           amount: Math.abs(info.delta),
           purchasingPrice: item.cost,
           storeFrom: item.targetStoreId,
+          recordId: item.recordId,
         });
       }
     }
 
+    // Helper to add elements to documents, respecting the 1,000 items per document limit
+    const addElementsWithChunking = async (
+      elements: Array<{ docId: number; productId: number; amount: number; purchasingPrice?: number; storeTo?: number; storeFrom?: number; recordId: string }>,
+      docType: 'S' | 'D'
+    ) => {
+      let remaining = [...elements];
+      while (remaining.length > 0) {
+        const getDoc = docType === 'S' ? docContext.getOrCreateReceiptDoc : docContext.getOrCreateDeductionDoc;
+        const activeDocId = getDoc ? await getDoc() : (docType === 'S' ? docContext.receiptDocId : docContext.deductionDocId);
+
+        if (!activeDocId) {
+          throw new Error(`Failed to create or obtain ${docType === 'S' ? 'receipt' : 'deduction'} document in Bitrix`);
+        }
+
+        const capacity = docContext.getRemainingCapacity ? docContext.getRemainingCapacity(docType) : remaining.length;
+        const countToTake = Math.max(1, Math.min(remaining.length, capacity));
+        const chunk = remaining.slice(0, countToTake);
+        remaining = remaining.slice(countToTake);
+
+        chunk.forEach(el => (el.docId = activeDocId));
+        const addRes = await stockReceiptService.batchAddDocumentElements(chunk);
+
+        chunk.forEach((el, idx) => {
+          const elRes = addRes.results?.[idx];
+          const info = itemAdjustmentInfo.get(el.recordId);
+          if (elRes && elRes.success) {
+            if (info) (info as any).assignedDocId = activeDocId;
+            if (docContext.onElementAdded) docContext.onElementAdded(docType, el.productId, el.amount);
+            if (docContext.plannedStockMap) {
+              const storeId = el.storeTo || el.storeFrom;
+              if (storeId) {
+                const newStock = info?.targetQty !== undefined ? info.targetQty : (docType === 'S' ? el.amount : 0);
+                docContext.plannedStockMap.set(`${el.productId}_${storeId}`, newStock);
+              }
+            }
+          } else {
+            if (info) {
+              info.partialNotes.push(`Failed to add item to ${docType === 'S' ? 'receipt' : 'deduction'} document: ${elRes?.error || 'Bitrix error'}`);
+            }
+          }
+        });
+      }
+    };
+
     // Add elements to Receipt document if any
     if (receiptElements.length > 0) {
       try {
-        let rDocId = docContext.receiptDocId;
-        if (!rDocId && docContext.getOrCreateReceiptDoc) {
-          rDocId = await docContext.getOrCreateReceiptDoc();
-          docContext.receiptDocId = rDocId;
-        }
-        if (rDocId) {
-          receiptElements.forEach(el => (el.docId = rDocId!));
-          const addRes = await stockReceiptService.batchAddDocumentElements(receiptElements);
-          receiptElements.forEach((el, idx) => {
-            const elRes = addRes.results?.[idx];
-            if (elRes && elRes.success) {
-              if (docContext.onElementAdded) docContext.onElementAdded('S', el.productId, el.amount);
-              if (docContext.plannedStockMap && el.storeTo) {
-                const matchedItem = itemsToProcess.find(it => {
-                  const info = itemAdjustmentInfo.get(it.recordId);
-                  return info && info.productId === el.productId;
-                });
-                const info = matchedItem ? itemAdjustmentInfo.get(matchedItem.recordId) : null;
-                const newStock = info?.targetQty !== undefined ? info.targetQty : el.amount;
-                docContext.plannedStockMap.set(`${el.productId}_${el.storeTo}`, newStock);
-              }
-            } else {
-              const matchedItem = itemsToProcess.find(it => {
-                const info = itemAdjustmentInfo.get(it.recordId);
-                return info && info.productId === el.productId;
-              });
-              if (matchedItem) {
-                const info = itemAdjustmentInfo.get(matchedItem.recordId);
-                if (info) info.partialNotes.push(`Failed to add item to receipt document: ${elRes?.error || 'Bitrix error'}`);
-              }
-            }
-          });
-        } else {
-          for (const el of receiptElements) {
-            const matchedItem = itemsToProcess.find(it => {
-              const info = itemAdjustmentInfo.get(it.recordId);
-              return info && info.productId === el.productId;
-            });
-            if (matchedItem) {
-              const info = itemAdjustmentInfo.get(matchedItem.recordId);
-              if (info) info.partialNotes.push('Failed to create or obtain stock receipt document in Bitrix');
-            }
-          }
-        }
+        await addElementsWithChunking(receiptElements, 'S');
       } catch (err: any) {
         logger.warn({ err: err?.message }, 'Failed to batch add receipt elements');
         for (const el of receiptElements) {
-          const matchedItem = itemsToProcess.find(it => {
-            const info = itemAdjustmentInfo.get(it.recordId);
-            return info && info.productId === el.productId;
-          });
-          if (matchedItem) {
-            const info = itemAdjustmentInfo.get(matchedItem.recordId);
-            if (info) info.partialNotes.push(`Failed to add item to receipt document: ${err?.message || 'Bitrix error'}`);
-          }
+          const info = itemAdjustmentInfo.get(el.recordId);
+          if (info) info.partialNotes.push(`Failed to add item to receipt document: ${err?.message || 'Bitrix error'}`);
         }
       }
     }
@@ -696,61 +694,12 @@ export class StockReceiptImportService {
     // Add elements to Deduction document if any
     if (deductionElements.length > 0) {
       try {
-        let dDocId = docContext.deductionDocId;
-        if (!dDocId && docContext.getOrCreateDeductionDoc) {
-          dDocId = await docContext.getOrCreateDeductionDoc();
-          docContext.deductionDocId = dDocId;
-        }
-        if (dDocId) {
-          deductionElements.forEach(el => (el.docId = dDocId!));
-          const addRes = await stockReceiptService.batchAddDocumentElements(deductionElements);
-          deductionElements.forEach((el, idx) => {
-            const elRes = addRes.results?.[idx];
-            if (elRes && elRes.success) {
-              if (docContext.onElementAdded) docContext.onElementAdded('D', el.productId, el.amount);
-              if (docContext.plannedStockMap && el.storeFrom) {
-                const matchedItem = itemsToProcess.find(it => {
-                  const info = itemAdjustmentInfo.get(it.recordId);
-                  return info && info.productId === el.productId;
-                });
-                const info = matchedItem ? itemAdjustmentInfo.get(matchedItem.recordId) : null;
-                const newStock = info?.targetQty !== undefined ? info.targetQty : 0;
-                docContext.plannedStockMap.set(`${el.productId}_${el.storeFrom}`, newStock);
-              }
-            } else {
-              const matchedItem = itemsToProcess.find(it => {
-                const info = itemAdjustmentInfo.get(it.recordId);
-                return info && info.productId === el.productId;
-              });
-              if (matchedItem) {
-                const info = itemAdjustmentInfo.get(matchedItem.recordId);
-                if (info) info.partialNotes.push(`Failed to add item to deduction document: ${elRes?.error || 'Bitrix error'}`);
-              }
-            }
-          });
-        } else {
-          for (const el of deductionElements) {
-            const matchedItem = itemsToProcess.find(it => {
-              const info = itemAdjustmentInfo.get(it.recordId);
-              return info && info.productId === el.productId;
-            });
-            if (matchedItem) {
-              const info = itemAdjustmentInfo.get(matchedItem.recordId);
-              if (info) info.partialNotes.push('Failed to create or obtain stock deduction document in Bitrix');
-            }
-          }
-        }
+        await addElementsWithChunking(deductionElements, 'D');
       } catch (err: any) {
         logger.warn({ err: err?.message }, 'Failed to batch add deduction elements');
         for (const el of deductionElements) {
-          const matchedItem = itemsToProcess.find(it => {
-            const info = itemAdjustmentInfo.get(it.recordId);
-            return info && info.productId === el.productId;
-          });
-          if (matchedItem) {
-            const info = itemAdjustmentInfo.get(matchedItem.recordId);
-            if (info) info.partialNotes.push(`Failed to add item to deduction document: ${err?.message || 'Bitrix error'}`);
-          }
+          const info = itemAdjustmentInfo.get(el.recordId);
+          if (info) info.partialNotes.push(`Failed to add item to deduction document: ${err?.message || 'Bitrix error'}`);
         }
       }
     }
@@ -762,12 +711,13 @@ export class StockReceiptImportService {
 
       const hasError = info.partialNotes.length > 0;
       const status: StockReceiptResultStatus = hasError ? 'FAILED' : 'SUCCESS';
+      const assignedDoc = (info as any).assignedDocId || docContext.receiptDocId || docContext.deductionDocId;
 
       results.set(item.recordId, {
         status,
         actionTaken: info.actionTaken,
         bitrixProductId: String(info.productId),
-        bitrixDocumentId: docContext.receiptDocId ? String(docContext.receiptDocId) : (docContext.deductionDocId ? String(docContext.deductionDocId) : undefined),
+        bitrixDocumentId: assignedDoc ? String(assignedDoc) : undefined,
         warehouseId: item.targetStoreId,
         quantityArrived: info.targetQty !== undefined ? info.targetQty : 0,
         purchasePrice: item.cost,

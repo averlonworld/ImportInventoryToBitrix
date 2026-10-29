@@ -34,14 +34,15 @@ export class ExcelService {
     try {
       const workbook = new ExcelJS.Workbook();
       await workbook.xlsx.readFile(filePath);
-      const worksheet = workbook.worksheets[0];
 
-      if (!worksheet) {
+      if (!workbook.worksheets || workbook.worksheets.length === 0) {
         throw new AppError('Excel file contains no worksheets', 400);
       }
 
+      // Read headers from the first sheet
+      const firstWorksheet = workbook.worksheets[0];
       const headers: string[] = [];
-      const headerRow = worksheet.getRow(1);
+      const headerRow = firstWorksheet.getRow(1);
       headerRow.eachCell({ includeEmpty: false }, (cell) => {
         const header = String(cell.value ?? '').trim();
         if (header) headers.push(header);
@@ -52,32 +53,50 @@ export class ExcelService {
       }
 
       const rows: ExcelRow[] = [];
-      worksheet.eachRow((row, rowNumber) => {
-        if (rowNumber === 1) return; // Skip header row
+      let globalRowNumber = 1;
 
-        const excelRow: ExcelRow = {};
-        let hasData = false;
+      // Iterate through all worksheets (handles single-sheet files and multi-sheet workbooks)
+      for (const worksheet of workbook.worksheets) {
+        if (!worksheet || worksheet.rowCount < 1) continue;
 
-        headers.forEach((header, idx) => {
-          const cell = row.getCell(idx + 1);
-          const textVal = cell.text ? String(cell.text).trim() : '';
-          const rawVal = textVal || this.cellToString(cell.value).trim();
-          excelRow[header] = rawVal;
-          if (rawVal) hasData = true;
-        });
+        // Determine whether row 1 of this sheet is a header row
+        const sheetHeaderRow = worksheet.getRow(1);
+        const firstCellVal = String(sheetHeaderRow.getCell(1).value ?? '').trim().toLowerCase();
+        const isHeaderRow = headers.some(h => h.toLowerCase() === firstCellVal);
 
-        if (hasData) {
-          rows.push({
-            _rowNumber: rowNumber,
-            ...excelRow,
+        worksheet.eachRow((row, rowNumber) => {
+          if (rowNumber === 1 && isHeaderRow) return; // Skip header row
+
+          const excelRow: ExcelRow = {};
+          let hasData = false;
+
+          headers.forEach((header, idx) => {
+            const cell = row.getCell(idx + 1);
+            const textVal = cell.text ? String(cell.text).trim() : '';
+            const rawVal = textVal || this.cellToString(cell.value).trim();
+            excelRow[header] = rawVal;
+            if (rawVal) hasData = true;
           });
-        }
-      });
+
+          if (hasData) {
+            globalRowNumber++;
+            rows.push({
+              _rowNumber: globalRowNumber,
+              ...excelRow,
+            });
+          }
+        });
+      }
+
+      const sheetNames = workbook.worksheets.map(w => w.name).filter(Boolean);
+      const worksheetLabel = sheetNames.length > 1
+        ? `${sheetNames[0]} (+${sheetNames.length - 1} sheets)`
+        : (sheetNames[0] || 'Sheet1');
 
       return {
         fileName,
         fileSize,
-        worksheetName: worksheet.name,
+        worksheetName: worksheetLabel,
         headers,
         rows,
         totalRows: rows.length,

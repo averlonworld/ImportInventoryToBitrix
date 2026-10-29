@@ -399,7 +399,8 @@ export class BitrixStockReceiptService {
         if (
           titleStr === cleanTitle ||
           titleStr.startsWith(`${cleanTitle} (Adjustment`) ||
-          titleStr.startsWith(`${cleanTitle} (`)
+          titleStr.startsWith(`${cleanTitle} (`) ||
+          titleStr.startsWith(`${cleanTitle} - Part `)
         ) {
           const id = Number(d.id);
           try {
