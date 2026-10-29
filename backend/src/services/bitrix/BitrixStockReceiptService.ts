@@ -365,6 +365,18 @@ export class BitrixStockReceiptService {
 
   async deleteDocument(docId: number): Promise<boolean> {
     try {
+      // Safety guard: Never delete conducted/processed documents
+      try {
+        const docCheck = await this.client.callMethod('catalog.document.get', { id: Number(docId) });
+        const docObj = docCheck?.document || docCheck?.result?.document || docCheck?.result || docCheck;
+        if (docObj && (docObj.status === 'Y' || docObj.status === 'S')) {
+          logger.warn({ docId }, 'Safety guard: Refusing to delete conducted/processed inventory document');
+          return false;
+        }
+      } catch {
+        // Document may not exist or cannot be fetched
+      }
+
       await this.client.callMethod('catalog.document.delete', { id: Number(docId) });
       return true;
     } catch (err: any) {
@@ -375,6 +387,18 @@ export class BitrixStockReceiptService {
 
   async cancelDocument(docId: number): Promise<boolean> {
     try {
+      // Safety guard: Never cancel conducted/processed documents automatically
+      try {
+        const docCheck = await this.client.callMethod('catalog.document.get', { id: Number(docId) });
+        const docObj = docCheck?.document || docCheck?.result?.document || docCheck?.result || docCheck;
+        if (docObj && (docObj.status === 'Y' || docObj.status === 'S')) {
+          logger.warn({ docId }, 'Safety guard: Refusing to cancel conducted/processed inventory document');
+          return false;
+        }
+      } catch {
+        // Document may not exist or cannot be fetched
+      }
+
       await this.client.callMethod('catalog.document.cancel', { id: Number(docId) });
       return true;
     } catch (err: any) {
@@ -396,6 +420,12 @@ export class BitrixStockReceiptService {
       let removedCount = 0;
       for (const d of docs) {
         const titleStr = String(d.title || '');
+        const docStatus = String(d.status || '');
+        if (docStatus === 'Y' || docStatus === 'S') {
+          // Never delete or cancel conducted/processed documents
+          continue;
+        }
+
         if (
           titleStr === cleanTitle ||
           titleStr.startsWith(`${cleanTitle} (Adjustment`) ||

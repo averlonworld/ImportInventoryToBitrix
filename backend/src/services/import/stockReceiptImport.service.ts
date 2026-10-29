@@ -649,7 +649,7 @@ export class StockReceiptImportService {
         }
 
         const capacity = docContext.getRemainingCapacity ? docContext.getRemainingCapacity(docType) : remaining.length;
-        const countToTake = Math.max(1, Math.min(remaining.length, capacity));
+        const countToTake = Math.max(1, Math.min(remaining.length, capacity > 0 ? capacity : 1000));
         const chunk = remaining.slice(0, countToTake);
         remaining = remaining.slice(countToTake);
 

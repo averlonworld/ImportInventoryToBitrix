@@ -14,11 +14,7 @@ export interface ImportJobData {
 export const importQueue = new Queue<ImportJobData>('import-queue', {
   connection: redisConnection,
   defaultJobOptions: {
-    attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 2000,
-    },
+    attempts: 1, // Single execution; item-level retries are handled by Tier 2 engine to prevent duplicate job restarts
     removeOnComplete: 100,
     removeOnFail: 200,
   },

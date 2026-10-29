@@ -224,10 +224,6 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
           effectiveMapping.defaultStoreId = resolvedStore;
           logger.info(`Initialized warehouse context for store ${resolvedStore} (${storesList.length} stores available)`);
         }
-
-        // Clean up superseded document(s) with the same title before processing
-        // so that re-importing the same document title reflects only the latest numbers (e.g. 12 instead of 1131)
-        await stockReceiptService.cancelAndRemoveExistingDocumentsByTitle(docTitle);
       } catch (err: any) {
         logger.warn({ err: err?.message }, 'Failed to fetch stores list; defaulting to primary store');
       }
@@ -345,7 +341,7 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
       const currentPart = parts[parts.length - 1];
       if (!currentPart) return MAX_DOC_ELEMENTS;
       const remaining = MAX_DOC_ELEMENTS - currentPart.count;
-      return remaining > 0 ? remaining : MAX_DOC_ELEMENTS;
+      return remaining > 0 ? remaining : 0;
     };
 
     const stockAdjustmentContext: StockAdjustmentContext = {
@@ -917,8 +913,19 @@ async function processJob(job: Job<ImportJobData>): Promise<void> {
               }
             }
           } else {
-            // Delete unused draft document
-            await stockReceiptService.deleteDocument(docId);
+            try {
+              const checkRes = await client.callMethod('catalog.document.element.list', { filter: { docId: Number(docId) } });
+              const checkElems = (checkRes && (checkRes.documentElements || checkRes.result || checkRes)) || [];
+              if (Array.isArray(checkElems) && checkElems.length > 0) {
+                logger.info({ docId, count: checkElems.length }, 'Document has elements in Bitrix; conducting it');
+                const conductRes = await stockReceiptService.conductDocument(docId);
+                if (conductRes.success) conductedDocs.push(docId);
+              } else {
+                await stockReceiptService.deleteDocument(docId);
+              }
+            } catch {
+              // Leave untouched to prevent accidental data loss
+            }
           }
         };
 
